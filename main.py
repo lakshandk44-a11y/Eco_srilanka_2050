@@ -430,7 +430,7 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "category_times" in self.schedule_data[today]:
             return self.schedule_data[today]["category_times"]
-        sl_times = ["07:30", "08:45", "10:00", "11:15", "13:30", "14:00", "15:30", "17:00", "18:45", "23:16"]
+        sl_times = ["07:30", "08:45", "10:00", "11:15", "13:30", "14:00", "15:30", "17:00", "18:45", "23:25"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["category_times"] = sl_times
@@ -441,7 +441,7 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["23:17", "23:19", "23:22"]
+        sl_times = ["23:27", "23:29", "23:31"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
@@ -528,15 +528,6 @@ class SriLanka2050Bot:
 # 7. SCHEDULE SETUP
 # ============================================================
 
-def setup_schedules(bot):
-    category_times = bot.scheduler.get_daily_category_schedule()
-    for i, time_str in enumerate(category_times):
-        schedule.every().day.at(time_str).do(lambda idx=i: scheduled_category_post(bot, idx))
-    
-    historical_times = bot.scheduler.get_daily_historical_schedule()
-    for time_str in historical_times:
-        schedule.every().day.at(time_str).do(lambda: scheduled_historical_post(bot))
-
 def scheduled_category_post(bot, index):
     if index < len(bot.categories):
         if not bot.scheduler.is_posted_today("category", bot.categories[index]):
@@ -552,6 +543,15 @@ def scheduled_historical_post(bot):
             bot.run_historical_post(i)
             return schedule.CancelJob
     return schedule.CancelJob
+
+def setup_schedules(bot):
+    category_times = bot.scheduler.get_daily_category_schedule()
+    for i, time_str in enumerate(category_times):
+        schedule.every().day.at(time_str).do(lambda idx=i: scheduled_category_post(bot, idx))
+    
+    historical_times = bot.scheduler.get_daily_historical_schedule()
+    for time_str in historical_times:
+        schedule.every().day.at(time_str).do(lambda: scheduled_historical_post(bot))
 
 
 # ============================================================
