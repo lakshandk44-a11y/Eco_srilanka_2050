@@ -17,6 +17,7 @@ import requests
 import http.server
 import socketserver
 import threading
+import schedule  # <-- FIXED: Added missing import
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -105,7 +106,6 @@ class GeminiGenerator:
             elif response.status_code == 503:
                 logger.warning("⚠️ Hugging Face model is loading. Retrying in 20s...")
                 time.sleep(20)
-                # Retry once
                 response = requests.post(
                     API_URL,
                     headers=headers,
@@ -166,14 +166,12 @@ class GeminiGenerator:
         """
 
         try:
-            # Generate image via Hugging Face SDXL (free, high quality)
             image_bytes = self.generate_image_via_huggingface(image_prompt)
 
             if not image_bytes:
                 logger.error(f"No image generated for category: {category}")
                 return None, None
 
-            # Generate caption using Gemini 2.5 Flash with retry
             logger.info(f"📝 Generating caption for category: {category}")
             caption = None
             
@@ -209,7 +207,6 @@ class GeminiGenerator:
         Returns: (past_img, future_img, destruction_img, caption)
         """
         
-        # --- PROMPT 1: Historical Past ---
         past_prompt = f"""
         Historically accurate photograph of {place} ({place_en}), Sri Lanka
         in its original golden age. National Geographic documentary style,
@@ -218,7 +215,6 @@ class GeminiGenerator:
         vintage film quality, lush greenery, photorealistic.
         """
 
-        # --- PROMPT 2: Future 2050 ---
         future_prompt = f"""
         Photorealistic image of {place} ({place_en}), Sri Lanka in 2050
         with sustainable development and preservation. Heritage site preserved,
@@ -228,7 +224,6 @@ class GeminiGenerator:
         8K ultra realistic photography, harmonious sustainable future.
         """
 
-        # --- PROMPT 3: Environmental Destruction ---
         destruction_prompt = f"""
         Photorealistic devastating environmental destruction of {place} ({place_en}), 
         Sri Lanka. Plastic waste piles, garbage, graffiti on ancient walls,
@@ -237,7 +232,6 @@ class GeminiGenerator:
         wide angle lens showing full scale of destruction, ultra realistic 8K.
         """
 
-        # --- Caption Prompt ---
         caption_prompt = f"""
         Write a Facebook post caption in Sinhala language about {place} ({place_en}) in Sri Lanka.
 
@@ -260,7 +254,6 @@ class GeminiGenerator:
         """
 
         def _generate_single_image(prompt: str, label: str) -> Optional[bytes]:
-            """Helper to generate one image using Hugging Face SDXL"""
             try:
                 logger.info(f"[{label}] Generating...")
                 return self.generate_image_via_huggingface(prompt)
@@ -271,18 +264,15 @@ class GeminiGenerator:
         try:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
 
-            # Generate 3 images using Hugging Face SDXL
             past_bytes = _generate_single_image(past_prompt, "1/3 Past")
             future_bytes = _generate_single_image(future_prompt, "2/3 Future 2050")
             destruction_bytes = _generate_single_image(destruction_prompt, "3/3 Destruction")
 
-            # Count how many we got
             images = [img for img in [past_bytes, future_bytes, destruction_bytes] if img is not None]
             if len(images) < 2:
                 logger.error(f"❌ Not enough images generated for historical: {place} ({place_en})")
                 return past_bytes, future_bytes, destruction_bytes, None
 
-            # Generate caption using Gemini 2.5 Flash with retry
             logger.info(f"📝 Generating Sinhala caption...")
             caption = None
             
@@ -323,17 +313,11 @@ class FacebookPublisher:
         self.api_base = "https://graph.facebook.com/v19.0"
 
     def post_single_image(self, image_bytes: bytes, caption: str) -> bool:
-        """
-        Post a single image to Facebook Page with caption and hashtags.
-        Uses the Graph API photo endpoint.
-        """
         try:
             url = f"{self.api_base}/{self.page_id}/photos"
             
-            # Save image temporarily for upload
             temp_path = IMAGES_DIR / f"temp_post_{int(time.time())}.jpg"
             
-            # Convert to JPG for smaller size
             try:
                 img = Image.open(io.BytesIO(image_bytes))
                 img = img.convert("RGB")
@@ -353,7 +337,6 @@ class FacebookPublisher:
                     }
                 )
 
-            # Clean up temp file
             temp_path.unlink(missing_ok=True)
 
             if response.status_code == 200:
@@ -369,16 +352,11 @@ class FacebookPublisher:
             return False
 
     def post_multi_image(self, image_bytes_list: List[bytes], caption: str) -> bool:
-        """
-        Post multiple images (up to 3) as a single Facebook post with caption.
-        Uses Graph API batch upload and then creates a published post.
-        """
         try:
             if not image_bytes_list:
                 logger.error("No images to post")
                 return False
 
-            # Step 1: Upload each image to get media IDs
             media_ids = []
             temp_files = []
 
@@ -417,7 +395,6 @@ class FacebookPublisher:
                 else:
                     logger.error(f"Upload failed for image {i+1}: {upload_resp.text}")
 
-            # Clean up temp files
             for tp in temp_files:
                 tp.unlink(missing_ok=True)
 
@@ -425,7 +402,6 @@ class FacebookPublisher:
                 logger.error("No media IDs obtained")
                 return False
 
-            # Step 2: Create published post with attached media
             post_url = f"{self.api_base}/{self.page_id}/feed"
             
             media_data = [{"media_fbid": mid} for mid in media_ids]
@@ -482,7 +458,6 @@ class PostScheduler:
             logger.error(f"Could not save {filepath}: {e}")
 
     def mark_posted(self, post_type: str, identifier: str):
-        """Mark a post as completed for today"""
         today = datetime.now().strftime("%Y-%m-%d")
         if today not in self.posted_log:
             self.posted_log[today] = {"category": [], "historical": []}
@@ -497,7 +472,6 @@ class PostScheduler:
         self._save_json(self.posted_log, self.log_file)
 
     def is_posted_today(self, post_type: str, identifier: str) -> bool:
-        """Check if this post was already done today"""
         today = datetime.now().strftime("%Y-%m-%d")
         if today not in self.posted_log:
             return False
@@ -509,9 +483,6 @@ class PostScheduler:
         return False
 
     def get_daily_category_schedule(self) -> List[str]:
-        """
-        Return 10 fixed times for category posts in Sri Lanka time (SLST - UTC+5:30).
-        """
         today = datetime.now().strftime("%Y-%m-%d")
         
         if today in self.schedule_data and "category_times" in self.schedule_data[today]:
@@ -519,7 +490,7 @@ class PostScheduler:
         
         sl_times = [
             "07:30", "08:45", "10:00", "11:15", "13:30",
-            "14:00", "15:30", "17:00", "18:45", "22:47"
+            "14:00", "15:30", "17:00", "18:45", "22:57"
         ]
         
         if today not in self.schedule_data:
@@ -530,15 +501,12 @@ class PostScheduler:
         return sl_times
 
     def get_daily_historical_schedule(self) -> List[str]:
-        """
-        Return 3 fixed times for historical place posts in Sri Lanka time (SLST - UTC+5:30).
-        """
         today = datetime.now().strftime("%Y-%m-%d")
         
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
         
-        sl_times = ["22:49", "22:52", "22:54"]
+        sl_times = ["22:58", "22:59", "23:01"]
         
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
@@ -548,7 +516,6 @@ class PostScheduler:
         return sl_times
 
     def get_pending_summary(self, categories: list, historical_places: list) -> str:
-        """Return a summary of today's schedule and pending posts"""
         today = datetime.now().strftime("%Y-%m-%d")
         now = datetime.now()
         
@@ -610,7 +577,6 @@ class SriLanka2050Bot:
         self.facebook = FacebookPublisher(FACEBOOK_PAGE_ID, FACEBOOK_PAGE_ACCESS_TOKEN)
         self.scheduler = PostScheduler()
         
-        # === 10 CATEGORIES (Non-political) ===
         self.categories = [
             "ආර්ථිකය (Economy)",
             "අධ්‍යාපනය (Education)",
@@ -624,7 +590,6 @@ class SriLanka2050Bot:
             "සංචාරක කර්මාන්තය (Tourism)"
         ]
         
-        # === 10 FAMOUS SRI LANKAN PLACES ===
         self.historical_places = [
             ("සීගිරිය", "Sigiriya"),
             ("ගාල්ල කොටුව", "Galle Fort"),
@@ -639,7 +604,6 @@ class SriLanka2050Bot:
         ]
 
     def run_category_post(self, category_index: int):
-        """Generate and post ONE category image"""
         if category_index < 0 or category_index >= len(self.categories):
             logger.error(f"Invalid category index: {category_index}")
             return False
@@ -670,7 +634,6 @@ class SriLanka2050Bot:
         return success
 
     def run_historical_post(self, place_index: int):
-        """Generate and post ONE historical place with 3 images"""
         if place_index < 0 or place_index >= len(self.historical_places):
             logger.error(f"Invalid place index: {place_index}")
             return False
@@ -712,7 +675,6 @@ class SriLanka2050Bot:
         return success
 
     def run_full_category_cycle(self):
-        """Run all category posts that haven't been posted today yet."""
         today = datetime.now().strftime("%Y-%m-%d")
         logger.info(f"===== Starting Category Post Cycle: {today} =====")
         
@@ -727,7 +689,6 @@ class SriLanka2050Bot:
         logger.info(f"===== Category Post Cycle Complete: {today} =====")
 
     def run_full_historical_cycle(self):
-        """Post the next historical place that hasn't been posted."""
         today = datetime.now().strftime("%Y-%m-%d")
         
         for i, (place_si, place_en) in enumerate(self.historical_places):
@@ -741,7 +702,7 @@ class SriLanka2050Bot:
 
 
 # ============================================================
-# 7. SCHEDULE SETUP & MAIN LOOP (FIXED)
+# 7. SCHEDULE SETUP & MAIN LOOP
 # ============================================================
 
 def setup_schedules(bot: SriLanka2050Bot):
@@ -761,7 +722,6 @@ def setup_schedules(bot: SriLanka2050Bot):
 
 
 def scheduled_category_post(bot: SriLanka2050Bot, index: int):
-    """Run a single category post at the scheduled time"""
     if index < len(bot.categories):
         category = bot.categories[index]
         if not bot.scheduler.is_posted_today("category", category):
@@ -773,7 +733,6 @@ def scheduled_category_post(bot: SriLanka2050Bot, index: int):
 
 
 def scheduled_historical_post(bot: SriLanka2050Bot):
-    """Run the next historical post at the scheduled time"""
     for i, (place_si, place_en) in enumerate(bot.historical_places):
         identifier = f"{place_si} ({place_en})"
         if not bot.scheduler.is_posted_today("historical", identifier):
@@ -790,7 +749,6 @@ def scheduled_historical_post(bot: SriLanka2050Bot):
 # ============================================================
 
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
-    """Railway health check endpoint"""
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
@@ -801,7 +759,6 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 def start_health_server():
-    """Start a minimal HTTP server for Railway health checks"""
     port = int(os.getenv("PORT", 8080))
     handler = HealthCheckHandler
     httpd = socketserver.TCPServer(("", port), handler)
@@ -814,7 +771,6 @@ def start_health_server():
 # ============================================================
 
 def main():
-    """Main entry point"""
     logger.info("=" * 60)
     logger.info("🚀 2050 Sri Lanka Facebook Auto-Post Bot Starting...")
     logger.info("=" * 60)
@@ -842,7 +798,7 @@ def main():
     logger.info("""
     📋 BOT SCHEDULE SUMMARY:
     ========================
-    📸 Category Posts: 10 per day (නිශ්චිත ශ්‍රී ලංකා වේලාවන්)
+    📸 Category Posts: 10 per day
     
     🏛️ Historical Place Posts: 1 place per day × 3 times
     
@@ -870,12 +826,10 @@ def main():
 # ============================================================
 
 def manual_test_category(bot: SriLanka2050Bot, index: int = 0):
-    """Manually test a single category post"""
     logger.info(f"🧪 Manual test: Category {index}")
     bot.run_category_post(index)
 
 def manual_test_historical(bot: SriLanka2050Bot, index: int = 0):
-    """Manually test a single historical place post"""
     logger.info(f"🧪 Manual test: Historical {index}")
     bot.run_historical_post(index)
 
