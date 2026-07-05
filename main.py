@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 2050 Sri Lanka - Facebook Auto-Post Bot
-Powered by Gemini API (google-genai SDK) & Facebook Graph API
+Powered by Hugging Face SDXL (image) + Gemini 2.5 Flash (text)
 Author: HackerAI
 """
 
@@ -12,7 +12,7 @@ import random
 import logging
 import base64
 import io
-import schedule
+import urllib.parse
 import requests
 import http.server
 import socketserver
@@ -35,6 +35,7 @@ pip install --upgrade google-genai requests schedule python-dotenv Pillow
 
 # --- API Keys (Set as environment variables or use .env file) ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "YOUR_HUGGINGFACE_TOKEN_HERE")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "YOUR_FACEBOOK_PAGE_TOKEN_HERE")
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "YOUR_FACEBOOK_PAGE_ID_HERE")
 
@@ -59,54 +60,94 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 3. GEMINI API INTEGRATION (FIXED - google-genai SDK)
+# 3. GEMINI API INTEGRATION (FIXED - using Hugging Face SDXL)
 # ============================================================
 
 from google import genai as google_genai
 from google.genai import types
 
 class GeminiGenerator:
-    """Handles all Gemini API interactions via google-genai SDK"""
+    """Handles all API interactions"""
 
     def __init__(self, api_key: str):
         self.client = google_genai.Client(api_key=api_key)
 
+    def generate_image_via_huggingface(self, prompt: str) -> Optional[bytes]:
+        """
+        Generate image using Hugging Face SDXL (free, high quality).
+        Requires HUGGINGFACE_TOKEN environment variable.
+        """
+        try:
+            API_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+            headers = {"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"}
+            
+            logger.info(f"🎨 Generating image via Hugging Face SDXL: {prompt[:50]}...")
+            
+            response = requests.post(
+                API_URL,
+                headers=headers,
+                json={
+                    "inputs": prompt,
+                    "parameters": {
+                        "negative_prompt": "blurry, low quality, distorted, ugly, bad anatomy, watermark, text",
+                        "num_inference_steps": 30,
+                        "guidance_scale": 7.5,
+                        "width": 1024,
+                        "height": 1024
+                    }
+                },
+                timeout=120
+            )
+            
+            if response.status_code == 200 and len(response.content) > 1000:
+                logger.info(f"✅ Image generated: {len(response.content)} bytes")
+                return response.content
+            elif response.status_code == 503:
+                logger.warning("⚠️ Hugging Face model is loading. Retrying in 20s...")
+                time.sleep(20)
+                # Retry once
+                response = requests.post(
+                    API_URL,
+                    headers=headers,
+                    json={
+                        "inputs": prompt,
+                        "parameters": {
+                            "negative_prompt": "blurry, low quality, distorted, ugly, bad anatomy, watermark, text",
+                            "num_inference_steps": 30,
+                            "guidance_scale": 7.5,
+                            "width": 1024,
+                            "height": 1024
+                        }
+                    },
+                    timeout=120
+                )
+                if response.status_code == 200 and len(response.content) > 1000:
+                    logger.info(f"✅ Image generated on retry: {len(response.content)} bytes")
+                    return response.content
+                else:
+                    logger.error(f"❌ Hugging Face retry failed: {response.status_code}")
+                    return None
+            else:
+                logger.error(f"❌ Hugging Face error: {response.status_code} - {response.text[:200]}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Hugging Face exception: {e}")
+            return None
+
     def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
         """
-        Generate a highly realistic, possible future image of Sri Lanka in 2050
-        using Imagen 3.0 model.
+        Generate a highly realistic, possible future image of Sri Lanka in 2050.
+        Uses Hugging Face SDXL for image and Gemini for captions.
         Returns: (image_bytes, caption_with_hashtags)
         """
         image_prompt = f"""
-        Generate a photorealistic, ultra-high quality image of Sri Lanka in the year 2050.
-
+        Photorealistic ultra-high quality image of Sri Lanka in 2050.
         Category: {category}
-
-        The image MUST show something that is GENUINELY POSSIBLE and scientifically realistic
-        for Sri Lanka by 2050. No science fiction. No fantasy elements.
-
-        Scene requirements:
-        - Ultra realistic photography style - must look like a REAL photograph
-        - 8K resolution quality, sharp details
-        - Cinematic lighting with natural golden hour or bright daylight
-        - Clear blue water reflecting the sky with fluffy white clouds
-        - Lush tropical vegetation (palm trees, local flora)
-        - Sri Lankan landscape elements (mountains, beaches, or urban settings as appropriate)
-        - Clean, modern infrastructure that could realistically exist by 2050
-
-        For this category '{category}', here are realistic possibilities:
-        - ආර්ථිකය (Economy): Modern Colombo skyline with green buildings, solar panels on roofs
-        - අධ්‍යාපනය (Education): Digital classrooms with AR/VR, students using tablets under trees
-        - තාක්ෂණික දියුණුව (Tech): Smart farming with drones over paddy fields
-        - හරිත නගර (Green Cities): Colombo with vertical gardens, electric tuk-tuks
-        - පුනර්ජනනීය බලශක්තිය (Renewable Energy): Solar farms in Hambantota, wind turbines
-        - සංස්කෘතිය (Culture): Virtual Perahera with holographic elements
-        - ප්‍රවාහනය (Transport): Electric railway along coast, modern highways with EV charging
-        - කෘෂිකර්මය (Agriculture): Vertical farming, drone-monitored paddy fields
-        - සෞඛ්‍ය සේවා (Healthcare): Modern hospital with telemedicine, AI diagnostics
-        - සංචාරක කර්මාන්තය (Tourism): Eco-friendly resorts, smart heritage sites
-
-        DO NOT add any text overlays, watermarks, or labels on the image.
+        Ultra realistic photography style, must look like a REAL photograph,
+        8K resolution quality, sharp details, cinematic lighting with natural golden hour,
+        clear blue sky, fluffy white clouds, lush tropical vegetation,
+        modern sustainable infrastructure, award-winning travel photography.
         """
 
         caption_prompt = f"""
@@ -118,129 +159,82 @@ class GeminiGenerator:
         - 3-5 sentences describing the image and its future vision
         - Inspiring and positive tone
         - At the end, include 8-10 relevant hashtags in both Sinhala and English
-        - Hashtags should include: #SriLanka2050 #FutureSriLanka #{category.split('(')[1].split(')')[0].replace(' ', '') if '(' in category else category.replace(' ', '')} and relevant others
+        - Hashtags should include: #SriLanka2050 #FutureSriLanka and relevant others
         - Make it emotional and thought-provoking for Sri Lankan audience
         - DO NOT use any markdown formatting like ** or ##
         - Use simple, flowing Sinhala language
         """
 
         try:
-            # Generate image using Imagen 3.0
-            logger.info(f"🎨 Generating image for category: {category}")
-            response = self.client.models.generate_content(
-                model="imagen-3.0-generate-001",
-                contents=image_prompt,
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"]
-                )
-            )
-
-            # Extract image bytes from response
-            image_bytes = None
-            if response.candidates:
-                for part in response.candidates[0].content.parts:
-                    if part.inline_data and part.inline_data.mime_type.startswith("image/"):
-                        image_bytes = part.inline_data.data
-                        break
+            # Generate image via Hugging Face SDXL (free, high quality)
+            image_bytes = self.generate_image_via_huggingface(image_prompt)
 
             if not image_bytes:
                 logger.error(f"No image generated for category: {category}")
                 return None, None
 
-            logger.info(f"✅ Image generated: {len(image_bytes)} bytes")
-
-            # FIXED: Generate caption using Gemini 2.5 Flash - using models.generate_content instead of interactions.create
+            # Generate caption using Gemini 2.5 Flash with retry
             logger.info(f"📝 Generating caption for category: {category}")
-            cap_response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=caption_prompt
-            )
+            caption = None
+            
+            for attempt in range(3):
+                try:
+                    cap_response = self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=caption_prompt
+                    )
+                    caption = cap_response.text.strip() if cap_response.text else None
+                    if caption:
+                        break
+                except Exception as cap_e:
+                    wait_time = (attempt + 1) * 5
+                    logger.warning(f"⚠️ Caption attempt {attempt+1} failed: {cap_e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
 
-            caption = cap_response.text.strip() if cap_response.text else f"2050 දී ශ්‍රී ලංකාවේ {category} #SriLanka2050 #FutureSriLanka"
+            if not caption:
+                caption = f"2050 දී ශ්‍රී ලංකාවේ {category} #SriLanka2050 #FutureSriLanka"
 
             return image_bytes, caption
 
         except Exception as e:
-            logger.error(f"Gemini error for {category}: {e}")
+            logger.error(f"Generation error for {category}: {e}")
             return None, None
 
     def generate_historical_future_images(self, place: str, place_en: str) -> Tuple[Optional[bytes], Optional[bytes], Optional[bytes], Optional[str]]:
         """
-        Generate 3 images for a famous Sri Lankan place using Imagen 3.0:
+        Generate 3 images for a famous Sri Lankan place using Hugging Face SDXL.
         1. Historically accurate past view
-        2. Future possible view (2050)
-        3. Environmental destruction view (due to human negligence)
+        2. Future possible view (2050)  
+        3. Environmental destruction view
         Returns: (past_img, future_img, destruction_img, caption)
         """
         
         # --- PROMPT 1: Historical Past ---
         past_prompt = f"""
-        Generate a photorealistic, historically accurate photograph of {place} ({place_en}), Sri Lanka
-        as it would have appeared in its original/early golden age period.
-
-        CRITICAL - Must look like a REAL historical photograph:
-        - Historically accurate architecture, structures, and surroundings
-        - Natural lighting, clear blue sky with fluffy white clouds
-        - 8K cinematic quality photography, National Geographic documentary style
-        - Show the ORIGINAL glory and authentic appearance in its prime
-        - What it REALLY looked like during its peak period
-        - Lush greenery, natural environment typical of that era
-        - Clean water features (ponds, moats, lakes) reflecting the sky
-        - No modern constructions, no electricity, no vehicles, no tourists in modern clothes
-        - Ultra realistic - as if photographed during that period with vintage film quality
-        - Golden hour warm sunlight creating dramatic shadows
-        - DO NOT add any text overlays, watermarks, or labels
+        Historically accurate photograph of {place} ({place_en}), Sri Lanka
+        in its original golden age. National Geographic documentary style,
+        historically accurate architecture and structures, natural lighting,
+        8K cinematic quality, golden hour warm sunlight creating dramatic shadows,
+        vintage film quality, lush greenery, photorealistic.
         """
 
         # --- PROMPT 2: Future 2050 ---
         future_prompt = f"""
-        Generate a photorealistic, highly possible image of {place} ({place_en}), Sri Lanka
-        in the year 2050 after significant sustainable development and preservation.
-
-        CRITICAL - Must be SCIENTIFICALLY POSSIBLE by 2050:
-        - The heritage site is PRESERVED and protected
-        - Modern sustainable development around the site
-        - Solar-powered visitor centers (discreetly placed)
-        - Electric autonomous shuttles for visitors (no fossil fuel vehicles)
-        - Smart preservation systems (drones monitoring structural health)
-        - AR/VR information displays for educational tourism
-        - Clear blue water features, reflecting the sky
-        - Fluffy white clouds, cinematic golden hour lighting
-        - 8K ultra realistic photography quality
-        - Green technology integrated with heritage preservation
-        - Reforested surrounding areas with native plants
-        - Rainwater harvesting visible in landscape design
-        - NO science fiction elements, no flying cars, no cyberpunk
-        - Happy visitors from diverse backgrounds using eco-friendly facilities
-        - Overall feeling: hopeful, sustainable, harmonious
-        - DO NOT add any text overlays, watermarks, or labels
+        Photorealistic image of {place} ({place_en}), Sri Lanka in 2050
+        with sustainable development and preservation. Heritage site preserved,
+        solar-powered facilities discreetly placed, electric autonomous shuttles,
+        smart preservation systems, reforested surrounding areas, green technology,
+        clear blue sky with fluffy white clouds, cinematic golden hour lighting,
+        8K ultra realistic photography, harmonious sustainable future.
         """
 
         # --- PROMPT 3: Environmental Destruction ---
         destruction_prompt = f"""
-        Generate a photorealistic, emotionally devastating photograph of {place} ({place_en}), Sri Lanka
-        showing ENVIRONMENTAL DESTRUCTION caused by human negligence and carelessness.
-
-        CRITICAL - This MUST look like a REAL news photograph of environmental disaster:
-        - The {place_en} site is VISIBLE but SURROUNDED by destruction and decay
-        - FOREGROUND: Massive piles of plastic waste, garbage, empty bottles, food wrappers
-        - Ancient water features are DRY with cracked mud, filled with trash
-        - Toxic green algae blooms in any remaining stagnant water
-        - Graffiti spray-painted on ancient stone walls (vandalism)
-        - Broken stonework, chipped structures from human damage
-        - Erosion gullies on structures from acid rain and pollution
-        - Dead brown trees, tree stumps, invasive weeds everywhere
-        - Rusted collapsed safety railings, broken concrete pathways
-        - Discarded plastic bags caught in bushes and trees
-        - Cigarette butts, food wrappers scattered everywhere
-        - Overcast, polluted grey sky with haze (NOT clear blue sky)
-        - Muted, desaturated colors - no vibrant greens or blues
-        - Wide angle lens showing the FULL SCALE of destruction
-        - Ultra photorealistic, 8K quality, like a Pulitzer Prize winning photo
-        - Photojournalism style - like a National Geographic environmental disaster photo
-        - The image should make the viewer FEEL sadness, anger, and urgency
-        - DO NOT add any text overlays, watermarks, or labels
-        - DO NOT show any people
+        Photorealistic devastating environmental destruction of {place} ({place_en}), 
+        Sri Lanka. Plastic waste piles, garbage, graffiti on ancient walls,
+        dry cracked mud, toxic green algae, dead brown trees, polluted grey sky,
+        muted desaturated colors, photojournalism style, Pulitzer Prize winning photo,
+        wide angle lens showing full scale of destruction, ultra realistic 8K.
         """
 
         # --- Caption Prompt ---
@@ -260,29 +254,16 @@ class GeminiGenerator:
         - Strong call to action for heritage preservation
         - Emotional, inspiring, educational tone
         - At the end, include 8-10 hashtags
-        - Include: #HeritageProtection #{place_en.replace(' ', '')} #SriLanka #FutureVsDestruction #EnvironmentalAwareness #CulturalHeritage
+        - Include: #HeritageProtection #{place_en.replace(' ', '')} #SriLanka #FutureVsDestruction
         - DO NOT use markdown formatting like ** or ##
         - Make it shareable, emotional, and thought-provoking
         """
 
         def _generate_single_image(prompt: str, label: str) -> Optional[bytes]:
-            """Helper to generate one image using Imagen 3.0"""
+            """Helper to generate one image using Hugging Face SDXL"""
             try:
                 logger.info(f"[{label}] Generating...")
-                response = self.client.models.generate_content(
-                    model="imagen-3.0-generate-001",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["IMAGE", "TEXT"]
-                    )
-                )
-                if response.candidates:
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data and part.inline_data.mime_type.startswith("image/"):
-                            logger.info(f"✅ {label} image generated: {len(part.inline_data.data)} bytes")
-                            return part.inline_data.data
-                logger.error(f"❌ {label} image generation failed")
-                return None
+                return self.generate_image_via_huggingface(prompt)
             except Exception as e:
                 logger.error(f"❌ {label} error: {e}")
                 return None
@@ -290,23 +271,42 @@ class GeminiGenerator:
         try:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
 
-            # Generate 3 images using Imagen 3.0
+            # Generate 3 images using Hugging Face SDXL
             past_bytes = _generate_single_image(past_prompt, "1/3 Past")
             future_bytes = _generate_single_image(future_prompt, "2/3 Future 2050")
             destruction_bytes = _generate_single_image(destruction_prompt, "3/3 Destruction")
 
-            # FIXED: Generate caption using text model - using models.generate_content instead of interactions.create
+            # Count how many we got
+            images = [img for img in [past_bytes, future_bytes, destruction_bytes] if img is not None]
+            if len(images) < 2:
+                logger.error(f"❌ Not enough images generated for historical: {place} ({place_en})")
+                return past_bytes, future_bytes, destruction_bytes, None
+
+            # Generate caption using Gemini 2.5 Flash with retry
             logger.info(f"📝 Generating Sinhala caption...")
-            cap_response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=caption_prompt
-            )
-            caption = cap_response.text.strip() if cap_response.text else f"{place} - අතීතය, 2050 අනාගතය, සහ විනාශය #HeritageProtection #SriLanka"
+            caption = None
+            
+            for attempt in range(3):
+                try:
+                    cap_response = self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=caption_prompt
+                    )
+                    caption = cap_response.text.strip() if cap_response.text else None
+                    if caption:
+                        break
+                except Exception as cap_e:
+                    wait_time = (attempt + 1) * 10
+                    logger.warning(f"⚠️ Caption attempt {attempt+1} failed: {cap_e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+
+            if not caption:
+                caption = f"{place} - අතීතය, 2050 අනාගතය, සහ විනාශය #HeritageProtection #SriLanka"
 
             return past_bytes, future_bytes, destruction_bytes, caption
 
         except Exception as e:
-            logger.error(f"Gemini generation error for {place}: {e}")
+            logger.error(f"Generation error for {place}: {e}")
             return None, None, None, None
 
 
@@ -333,13 +333,12 @@ class FacebookPublisher:
             # Save image temporarily for upload
             temp_path = IMAGES_DIR / f"temp_post_{int(time.time())}.jpg"
             
-            # Convert PNG bytes to JPG for smaller size
+            # Convert to JPG for smaller size
             try:
                 img = Image.open(io.BytesIO(image_bytes))
                 img = img.convert("RGB")
                 img.save(temp_path, "JPEG", quality=95)
             except:
-                # If conversion fails, save as-is
                 with open(temp_path, "wb") as f:
                     f.write(image_bytes)
 
@@ -389,7 +388,6 @@ class FacebookPublisher:
 
                 temp_path = IMAGES_DIR / f"temp_multi_{int(time.time())}_{i}.jpg"
                 
-                # Convert PNG bytes to JPG for smaller size
                 try:
                     img = Image.open(io.BytesIO(img_bytes))
                     img = img.convert("RGB")
@@ -430,7 +428,6 @@ class FacebookPublisher:
             # Step 2: Create published post with attached media
             post_url = f"{self.api_base}/{self.page_id}/feed"
             
-            # For multiple images, we use the `attached_media` parameter
             media_data = [{"media_fbid": mid} for mid in media_ids]
 
             post_data = {
@@ -514,17 +511,15 @@ class PostScheduler:
     def get_daily_category_schedule(self) -> List[str]:
         """
         Return 10 fixed times for category posts in Sri Lanka time (SLST - UTC+5:30).
-        Posts are spread between 7:30 AM and 8:30 PM Sri Lanka time.
         """
         today = datetime.now().strftime("%Y-%m-%d")
         
         if today in self.schedule_data and "category_times" in self.schedule_data[today]:
             return self.schedule_data[today]["category_times"]
         
-        # ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 10ක්
         sl_times = [
             "07:30", "08:45", "10:00", "11:15", "13:30",
-            "14:00", "15:30", "17:00", "18:45", "21:37"
+            "14:00", "15:30", "17:00", "18:45", "22:47"
         ]
         
         if today not in self.schedule_data:
@@ -543,8 +538,7 @@ class PostScheduler:
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
         
-        # ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 3ක්
-        sl_times = ["21:38", "21:40", "21:42"]
+        sl_times = ["22:49", "22:52", "22:54"]
         
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
@@ -565,7 +559,6 @@ class PostScheduler:
         summary_parts.append(f"\n📅 අද ({today}) වේලාසටහන (ශ්‍රී ලංකා වේලාව - SLST):")
         summary_parts.append(f"{'='*50}")
         
-        # Category times
         summary_parts.append(f"\n📸 Category Posts (10):")
         for i, time_str in enumerate(cat_times):
             scheduled_time = datetime.strptime(time_str, "%H:%M").time()
@@ -581,12 +574,10 @@ class PostScheduler:
             
             summary_parts.append(f"   {time_str} - {cat_name} {status}")
         
-        # Historical times
         summary_parts.append(f"\n🏛️ Historical Posts (3 වතාවක්):")
         for time_str in hist_times:
             scheduled_time = datetime.strptime(time_str, "%H:%M").time()
             
-            # Check if any historical place already posted
             any_posted = False
             for place_si, place_en in historical_places:
                 if self.is_posted_today("historical", f"{place_si} ({place_en})"):
@@ -698,9 +689,8 @@ class SriLanka2050Bot:
         images = [img for img in [past_img, future_img, destruction_img] if img is not None]
         
         if len(images) < 2:
-            logger.error(f"❌ Not enough images generated for {identifier}")
+            logger.error(f"❌ Not enough images generated for historical: {identifier}")
             
-            # Save whatever images we got for debugging
             for i, img in enumerate([past_img, future_img, destruction_img]):
                 if img:
                     debug_path = IMAGES_DIR / f"debug_{place_en}_{i}.png"
@@ -757,18 +747,12 @@ class SriLanka2050Bot:
 def setup_schedules(bot: SriLanka2050Bot):
     """Set up the daily schedule."""
     
-    # FIXED: Use schedule.every().day.at() for precise time scheduling
-    # This ensures posts happen at the EXACT scheduled time, not just checking every 5 minutes
-    
-    # Category posts - schedule at precise times
     category_times = bot.scheduler.get_daily_category_schedule()
     for i, time_str in enumerate(category_times):
-        # Use closure to capture the correct index
         schedule.every().day.at(time_str).do(
             lambda idx=i: scheduled_category_post(bot, idx)
         )
     
-    # Historical posts - schedule at precise times
     historical_times = bot.scheduler.get_daily_historical_schedule()
     for time_str in historical_times:
         schedule.every().day.at(time_str).do(
@@ -785,7 +769,7 @@ def scheduled_category_post(bot: SriLanka2050Bot, index: int):
             bot.run_category_post(index)
         else:
             logger.info(f"⏭️ Category already posted today: {category}")
-    return schedule.CancelJob  # Run once per day
+    return schedule.CancelJob
 
 
 def scheduled_historical_post(bot: SriLanka2050Bot):
@@ -795,7 +779,7 @@ def scheduled_historical_post(bot: SriLanka2050Bot):
         if not bot.scheduler.is_posted_today("historical", identifier):
             logger.info(f"⏰ Scheduled time reached for historical: {identifier}")
             bot.run_historical_post(i)
-            return schedule.CancelJob  # Run once per day
+            return schedule.CancelJob
     
     logger.info("✅ All historical places posted for today!")
     return schedule.CancelJob
@@ -806,7 +790,7 @@ def scheduled_historical_post(bot: SriLanka2050Bot):
 # ============================================================
 
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
-    """Railway health check endpoint - required for Railway to keep the bot alive"""
+    """Railway health check endpoint"""
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
@@ -814,7 +798,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"2050 Sri Lanka Bot is running")
     
     def log_message(self, format, *args):
-        pass  # Don't log health checks to avoid spam
+        pass
 
 def start_health_server():
     """Start a minimal HTTP server for Railway health checks"""
@@ -837,17 +821,19 @@ def main():
     
     if "YOUR_GEMINI_API_KEY_HERE" in GEMINI_API_KEY:
         logger.error("❌ Please set your GEMINI_API_KEY environment variable!")
-        logger.error("   Set it in Railway -> Variables -> GEMINI_API_KEY")
+        return
+    
+    if "YOUR_HUGGINGFACE_TOKEN_HERE" in HUGGINGFACE_TOKEN:
+        logger.error("❌ Please set your HUGGINGFACE_TOKEN environment variable!")
+        logger.error("   Get it from: https://huggingface.co/settings/tokens")
         return
     
     if "YOUR_FACEBOOK_PAGE_TOKEN_HERE" in FACEBOOK_PAGE_ACCESS_TOKEN:
         logger.error("❌ Please set your FACEBOOK_PAGE_ACCESS_TOKEN!")
-        logger.error("   Set it in Railway -> Variables -> FACEBOOK_PAGE_ACCESS_TOKEN")
         return
     
     if "YOUR_FACEBOOK_PAGE_ID_HERE" in FACEBOOK_PAGE_ID:
         logger.error("❌ Please set your FACEBOOK_PAGE_ID!")
-        logger.error("   Set it in Railway -> Variables -> FACEBOOK_PAGE_ID")
         return
     
     bot = SriLanka2050Bot()
@@ -857,26 +843,17 @@ def main():
     📋 BOT SCHEDULE SUMMARY:
     ========================
     📸 Category Posts: 10 per day (නිශ්චිත ශ්‍රී ලංකා වේලාවන්)
-      - 10 non-political categories about Sri Lanka 2050
-      - Each post: 1 image + Sinhala caption + hashtags
     
     🏛️ Historical Place Posts: 1 place per day × 3 times
-      - 3 images per post (Past / Future 2050 / Destruction)
-      - Sinhala caption explaining the contrast
-      - Awareness about heritage protection
     
-    ⏰ Check interval: Every 5 minutes for pending posts
-    
-    🎨 Image Model: Imagen 3.0
-    💬 Text Model: Gemini 2.5 Flash
+    🎨 Image Model: Hugging Face SDXL (high quality, free)
+    💬 Text Model: Gemini 2.5 Flash (with retry logic)
     """)
     
-    # Start Railway health check server in a separate thread
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
     logger.info(f"🩺 Health check server started")
     
-    # Main loop
     try:
         while True:
             schedule.run_pending()
@@ -920,7 +897,6 @@ if __name__ == "__main__":
         elif sys.argv[1] == "--full-historical":
             bot.run_full_historical_cycle()
         elif sys.argv[1] == "--schedule":
-            # Just show today's schedule
             bot = SriLanka2050Bot()
             print(bot.scheduler.get_pending_summary(bot.categories, bot.historical_places))
         else:
