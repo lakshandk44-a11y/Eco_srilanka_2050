@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 2050 Sri Lanka - Facebook Auto-Post Bot
-Powered by Replicate (SDXL image) + Gemini 2.5 Flash (text)
+Powered by Gemini 2.5 Flash (text + image)
 Author: HackerAI
 """
 
@@ -27,7 +27,7 @@ from PIL import Image
 # 1. LIBRARY INSTALLATION
 # ============================================================
 """
-pip install --upgrade google-genai requests schedule python-dotenv Pillow replicate
+pip install --upgrade google-genai requests schedule python-dotenv Pillow
 """
 
 # ============================================================
@@ -36,7 +36,6 @@ pip install --upgrade google-genai requests schedule python-dotenv Pillow replic
 
 # --- API Keys ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "YOUR_REPLICATE_TOKEN_HERE")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "YOUR_FACEBOOK_PAGE_TOKEN_HERE")
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID", "YOUR_FACEBOOK_PAGE_ID_HERE")
 
@@ -60,10 +59,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 3. REPLICATE + GEMINI INTEGRATION
+# 3. GEMINI INTEGRATION (NO EXTERNAL API)
 # ============================================================
 
-import replicate
 from google import genai as google_genai
 from google.genai import types
 
@@ -73,57 +71,59 @@ class GeminiGenerator:
     def __init__(self, api_key: str):
         self.client = google_genai.Client(api_key=api_key)
 
-    def generate_image_via_replicate(self, prompt: str) -> Optional[bytes]:
+    def generate_image_via_gemini(self, prompt: str) -> Optional[bytes]:
         """
-        Generate high-quality image using Replicate SDXL (free credits).
+        Generate high-quality image using Gemini 2.5 Flash (free tier).
+        No additional API key needed.
         """
         try:
-            logger.info(f"🎨 Generating image via Replicate SDXL...")
+            logger.info(f"🎨 Generating image via Gemini 2.5 Flash...")
             
-            output = replicate.run(
-                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-                input={
-                    "prompt": prompt,
-                    "negative_prompt": "blurry, low quality, distorted, ugly, watermark, text, bad anatomy",
-                    "width": 1024,
-                    "height": 1024,
-                    "num_outputs": 1,
-                    "scheduler": "K_EULER",
-                    "num_inference_steps": 30,
-                    "guidance_scale": 7.5
-                }
+            generation_config = types.GenerationConfig(
+                temperature=1.0,
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=8192,
+                response_modalities=["Text", "Image"]
             )
-            
-            # Replicate returns a list of URLs
-            if output and len(output) > 0:
-                image_url = output[0]
-                logger.info(f"✅ Image URL received: {image_url}")
-                
-                # Download the image
-                img_response = requests.get(image_url, timeout=30)
-                if img_response.status_code == 200 and len(img_response.content) > 1000:
-                    logger.info(f"✅ Image downloaded: {len(img_response.content)} bytes")
-                    return img_response.content
-                else:
-                    logger.error(f"❌ Failed to download image from URL")
-                    return None
-            else:
-                logger.error(f"❌ No output from Replicate")
-                return None
-                
+
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=generation_config
+            )
+
+            if response and response.candidates:
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data:
+                        mime_type = part.inline_data.mime_type
+                        image_bytes = part.inline_data.data
+                        if 'image' in mime_type and len(image_bytes) > 1000:
+                            logger.info(f"✅ Image generated via Gemini: {len(image_bytes)} bytes")
+                            return image_bytes
+                        else:
+                            logger.error(f"❌ Invalid image data: {mime_type}, size: {len(image_bytes)}")
+                            return None
+                    elif part.text:
+                        logger.info(f"📝 Gemini response text (not image): {part.text[:100]}...")
+                        # Try: use text as enhanced prompt and ask for image again
+                        return None
+
+            logger.error(f"❌ No image in Gemini response")
+            return None
+
         except Exception as e:
-            logger.error(f"❌ Replicate exception: {e}")
+            logger.error(f"❌ Gemini image generation exception: {e}")
             return None
 
     def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
         """Generate image and caption for a category post."""
         image_prompt = f"""
-        Photorealistic ultra-high quality image of Sri Lanka in 2050.
+        Generate a photorealistic ultra-high quality image of Sri Lanka in 2050.
         Category: {category}
-        Ultra realistic photography style, must look like a REAL photograph,
-        8K resolution quality, sharp details, cinematic lighting with natural golden hour,
-        clear blue sky, fluffy white clouds, lush tropical vegetation,
-        modern sustainable infrastructure, award-winning travel photography.
+        Make it look like a REAL photograph with 8K resolution quality.
+        Cinematic lighting with natural golden hour, clear blue sky, fluffy white clouds,
+        lush tropical vegetation, modern sustainable infrastructure.
         """
 
         caption_prompt = f"""
@@ -142,7 +142,7 @@ class GeminiGenerator:
         """
 
         try:
-            image_bytes = self.generate_image_via_replicate(image_prompt)
+            image_bytes = self.generate_image_via_gemini(image_prompt)
 
             if not image_bytes:
                 logger.error(f"No image generated for category: {category}")
@@ -175,18 +175,18 @@ class GeminiGenerator:
             return None, None
 
     def generate_historical_future_images(self, place: str, place_en: str) -> Tuple[Optional[bytes], Optional[bytes], Optional[bytes], Optional[str]]:
-        """Generate 3 images for a historical place using Replicate."""
+        """Generate 3 images for a historical place using Gemini."""
         
         past_prompt = f"""
-        Historically accurate photograph of {place} ({place_en}), Sri Lanka
+        Generate a historically accurate photograph of {place} ({place_en}), Sri Lanka
         in its original golden age. National Geographic documentary style,
         historically accurate architecture and structures, natural lighting,
-        8K cinematic quality, golden hour warm sunlight creating dramatic shadows,
+        golden hour warm sunlight creating dramatic shadows,
         vintage film quality, lush greenery, photorealistic.
         """
 
         future_prompt = f"""
-        Photorealistic image of {place} ({place_en}), Sri Lanka in 2050
+        Generate a photorealistic image of {place} ({place_en}), Sri Lanka in 2050
         with sustainable development and preservation. Heritage site preserved,
         solar-powered facilities discreetly placed, electric autonomous shuttles,
         smart preservation systems, reforested surrounding areas, green technology,
@@ -195,11 +195,11 @@ class GeminiGenerator:
         """
 
         destruction_prompt = f"""
-        Photorealistic devastating environmental destruction of {place} ({place_en}), 
+        Generate a photorealistic devastating environmental destruction of {place} ({place_en}), 
         Sri Lanka. Plastic waste piles, garbage, graffiti on ancient walls,
         dry cracked mud, toxic green algae, dead brown trees, polluted grey sky,
-        muted desaturated colors, photojournalism style, Pulitzer Prize winning photo,
-        wide angle lens showing full scale of destruction, ultra realistic 8K.
+        muted desaturated colors, photojournalism style, wide angle lens
+        showing full scale of destruction, ultra realistic.
         """
 
         caption_prompt = f"""
@@ -226,7 +226,7 @@ class GeminiGenerator:
         def _generate_single_image(prompt: str, label: str) -> Optional[bytes]:
             try:
                 logger.info(f"[{label}] Generating...")
-                return self.generate_image_via_replicate(prompt)
+                return self.generate_image_via_gemini(prompt)
             except Exception as e:
                 logger.error(f"❌ {label} error: {e}")
                 return None
@@ -235,7 +235,9 @@ class GeminiGenerator:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
 
             past_bytes = _generate_single_image(past_prompt, "1/3 Past")
+            time.sleep(5)
             future_bytes = _generate_single_image(future_prompt, "2/3 Future 2050")
+            time.sleep(5)
             destruction_bytes = _generate_single_image(destruction_prompt, "3/3 Destruction")
 
             images = [img for img in [past_bytes, future_bytes, destruction_bytes] if img is not None]
@@ -441,7 +443,7 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["23:48", "23:50", "23:52"]
+        sl_times = ["23:59", "21:40", "21:42"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
@@ -582,9 +584,6 @@ def main():
     
     if "YOUR_GEMINI_API_KEY_HERE" in GEMINI_API_KEY:
         logger.error("❌ Set GEMINI_API_KEY!")
-        return
-    if "YOUR_REPLICATE_TOKEN_HERE" in REPLICATE_API_TOKEN:
-        logger.error("❌ Set REPLICATE_API_TOKEN!")
         return
     if "YOUR_FACEBOOK_PAGE_TOKEN_HERE" in FACEBOOK_PAGE_ACCESS_TOKEN:
         logger.error("❌ Set FACEBOOK_PAGE_ACCESS_TOKEN!")
