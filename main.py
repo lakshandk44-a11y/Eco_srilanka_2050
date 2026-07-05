@@ -14,6 +14,9 @@ import base64
 import io
 import schedule
 import requests
+import http.server
+import socketserver
+import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -56,14 +59,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 3. GEMINI API INTEGRATION (UPDATED - google-genai SDK)
+# 3. GEMINI API INTEGRATION (FIXED - google-genai SDK)
 # ============================================================
 
 from google import genai as google_genai
 from google.genai import types
 
 class GeminiGenerator:
-    """Handles all Gemini API interactions via google-genai SDK (Interactions API)"""
+    """Handles all Gemini API interactions via google-genai SDK"""
 
     def __init__(self, api_key: str):
         self.client = google_genai.Client(api_key=api_key)
@@ -71,7 +74,7 @@ class GeminiGenerator:
     def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
         """
         Generate a highly realistic, possible future image of Sri Lanka in 2050
-        using Gemini 3.1 Flash Image model.
+        using Imagen 3.0 model.
         Returns: (image_bytes, caption_with_hashtags)
         """
         image_prompt = f"""
@@ -122,23 +125,28 @@ class GeminiGenerator:
         """
 
         try:
-            # Generate image using Gemini 3.1 Flash Image model
+            # Generate image using Imagen 3.0 (FIXED: was gemini-3.1-flash-image)
             logger.info(f"🎨 Generating image for category: {category}")
-            interaction_img = self.client.interactions.create(
-                model="gemini-3.1-flash-image",
-                input=image_prompt,
-                response_format={
-                    "type": "image",
-                    "aspect_ratio": "16:9",
-                    "image_size": "4K"
-                }
+            response = self.client.models.generate_content(
+                model="imagen-3.0-generate-001",
+                contents=image_prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"]
+                )
             )
 
-            if not interaction_img.output_image:
+            # Extract image bytes from response (FIXED: was interaction_img.output_image.data)
+            image_bytes = None
+            if response.candidates:
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data and part.inline_data.mime_type.startswith("image/"):
+                        image_bytes = part.inline_data.data
+                        break
+
+            if not image_bytes:
                 logger.error(f"No image generated for category: {category}")
                 return None, None
 
-            image_bytes = base64.b64decode(interaction_img.output_image.data)
             logger.info(f"✅ Image generated: {len(image_bytes)} bytes")
 
             # Generate caption using Gemini 2.5 Flash (text model)
@@ -158,7 +166,7 @@ class GeminiGenerator:
 
     def generate_historical_future_images(self, place: str, place_en: str) -> Tuple[Optional[bytes], Optional[bytes], Optional[bytes], Optional[str]]:
         """
-        Generate 3 images for a famous Sri Lankan place using Gemini 3.1 Flash Image:
+        Generate 3 images for a famous Sri Lankan place using Imagen 3.0:
         1. Historically accurate past view
         2. Future possible view (2050)
         3. Environmental destruction view (due to human negligence)
@@ -257,61 +265,37 @@ class GeminiGenerator:
         - Make it shareable, emotional, and thought-provoking
         """
 
+        def _generate_single_image(prompt: str, label: str) -> Optional[bytes]:
+            """Helper to generate one image using Imagen 3.0 (FIXED)"""
+            try:
+                logger.info(f"[{label}] Generating...")
+                response = self.client.models.generate_content(
+                    model="imagen-3.0-generate-001",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE", "TEXT"]
+                    )
+                )
+                if response.candidates:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data and part.inline_data.mime_type.startswith("image/"):
+                            logger.info(f"✅ {label} image generated: {len(part.inline_data.data)} bytes")
+                            return part.inline_data.data
+                logger.error(f"❌ {label} image generation failed")
+                return None
+            except Exception as e:
+                logger.error(f"❌ {label} error: {e}")
+                return None
+
         try:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
 
-            # --- Generate Image 1: Past ---
-            logger.info(f"[1/3] Generating historical past view...")
-            interaction_past = self.client.interactions.create(
-                model="gemini-3.1-flash-image",
-                input=past_prompt,
-                response_format={
-                    "type": "image",
-                    "aspect_ratio": "16:9",
-                    "image_size": "4K"
-                }
-            )
-            past_bytes = base64.b64decode(interaction_past.output_image.data) if interaction_past.output_image else None
-            if past_bytes:
-                logger.info(f"✅ Past image generated: {len(past_bytes)} bytes")
-            else:
-                logger.error("❌ Past image generation failed")
+            # Generate 3 images using Imagen 3.0 (FIXED: was gemini-3.1-flash-image)
+            past_bytes = _generate_single_image(past_prompt, "1/3 Past")
+            future_bytes = _generate_single_image(future_prompt, "2/3 Future 2050")
+            destruction_bytes = _generate_single_image(destruction_prompt, "3/3 Destruction")
 
-            # --- Generate Image 2: Future 2050 ---
-            logger.info(f"[2/3] Generating future 2050 view...")
-            interaction_future = self.client.interactions.create(
-                model="gemini-3.1-flash-image",
-                input=future_prompt,
-                response_format={
-                    "type": "image",
-                    "aspect_ratio": "16:9",
-                    "image_size": "4K"
-                }
-            )
-            future_bytes = base64.b64decode(interaction_future.output_image.data) if interaction_future.output_image else None
-            if future_bytes:
-                logger.info(f"✅ Future image generated: {len(future_bytes)} bytes")
-            else:
-                logger.error("❌ Future image generation failed")
-
-            # --- Generate Image 3: Destruction ---
-            logger.info(f"[3/3] Generating environmental destruction view...")
-            interaction_destruction = self.client.interactions.create(
-                model="gemini-3.1-flash-image",
-                input=destruction_prompt,
-                response_format={
-                    "type": "image",
-                    "aspect_ratio": "16:9",
-                    "image_size": "4K"
-                }
-            )
-            destruction_bytes = base64.b64decode(interaction_destruction.output_image.data) if interaction_destruction.output_image else None
-            if destruction_bytes:
-                logger.info(f"✅ Destruction image generated: {len(destruction_bytes)} bytes")
-            else:
-                logger.error("❌ Destruction image generation failed")
-
-            # --- Generate Caption ---
+            # Generate caption using text model
             logger.info(f"📝 Generating Sinhala caption...")
             interaction_cap = self.client.interactions.create(
                 model="gemini-2.5-flash",
@@ -537,10 +521,9 @@ class PostScheduler:
         if today in self.schedule_data and "category_times" in self.schedule_data[today]:
             return self.schedule_data[today]["category_times"]
         
-        # === ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 10ක් ===
-        # උදේ 7:30 සිට රාත්‍රී 8:30 දක්වා පැය ගණනක් පුරා පැතිරුණු වේලාවන්
+        # ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 10ක්
         sl_times = [
-            "07:30", "08:45", "10:00", "11:15", "12:59",
+            "07:30", "08:45", "10:00", "11:15", "13:30",
             "14:00", "15:30", "17:00", "18:45", "20:30"
         ]
         
@@ -560,9 +543,8 @@ class PostScheduler:
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
         
-        # === ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 3ක් ===
-        # උදේ, දවල්, සහ හවස
-        sl_times = ["13:00", "13:02", "13:04"]
+        # ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 3ක්
+        sl_times = ["13:32", "13:34", "13:36"]
         
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
@@ -813,7 +795,31 @@ def setup_schedules(bot: SriLanka2050Bot):
 
 
 # ============================================================
-# 8. ENTRY POINT
+# 8. RAILWAY HEALTH CHECK SERVER
+# ============================================================
+
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+    """Railway health check endpoint - required for Railway to keep the bot alive"""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"2050 Sri Lanka Bot is running")
+    
+    def log_message(self, format, *args):
+        pass  # Don't log health checks to avoid spam
+
+def start_health_server():
+    """Start a minimal HTTP server for Railway health checks"""
+    port = int(os.getenv("PORT", 8080))
+    handler = HealthCheckHandler
+    httpd = socketserver.TCPServer(("", port), handler)
+    logger.info(f"✅ Health check server running on port {port}")
+    httpd.serve_forever()
+
+
+# ============================================================
+# 9. ENTRY POINT
 # ============================================================
 
 def main():
@@ -824,16 +830,17 @@ def main():
     
     if "YOUR_GEMINI_API_KEY_HERE" in GEMINI_API_KEY:
         logger.error("❌ Please set your GEMINI_API_KEY environment variable!")
-        logger.error("   Get your free API key: https://aistudio.google.com/app/apikey")
-        logger.error("   Then run: export GEMINI_API_KEY='your-key-here'")
+        logger.error("   Set it in Railway -> Variables -> GEMINI_API_KEY")
         return
     
     if "YOUR_FACEBOOK_PAGE_TOKEN_HERE" in FACEBOOK_PAGE_ACCESS_TOKEN:
         logger.error("❌ Please set your FACEBOOK_PAGE_ACCESS_TOKEN!")
+        logger.error("   Set it in Railway -> Variables -> FACEBOOK_PAGE_ACCESS_TOKEN")
         return
     
     if "YOUR_FACEBOOK_PAGE_ID_HERE" in FACEBOOK_PAGE_ID:
         logger.error("❌ Please set your FACEBOOK_PAGE_ID!")
+        logger.error("   Set it in Railway -> Variables -> FACEBOOK_PAGE_ID")
         return
     
     bot = SriLanka2050Bot()
@@ -853,9 +860,14 @@ def main():
     
     ⏰ Check interval: Every 5 minutes for pending posts
     
-    🎨 Image Model: Gemini 3.1 Flash Image (Nano Banana 2)
+    🎨 Image Model: Imagen 3.0
     💬 Text Model: Gemini 2.5 Flash
     """)
+    
+    # Start Railway health check server in a separate thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    logger.info(f"🩺 Health check server started")
     
     # Main loop
     try:
@@ -870,7 +882,7 @@ def main():
 
 
 # ============================================================
-# 9. MANUAL RUN OPTIONS (For testing)
+# 10. MANUAL RUN OPTIONS (For testing)
 # ============================================================
 
 def manual_test_category(bot: SriLanka2050Bot, index: int = 0):
