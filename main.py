@@ -125,7 +125,7 @@ class GeminiGenerator:
         """
 
         try:
-            # Generate image using Imagen 3.0 (FIXED: was gemini-3.1-flash-image)
+            # Generate image using Imagen 3.0
             logger.info(f"🎨 Generating image for category: {category}")
             response = self.client.models.generate_content(
                 model="imagen-3.0-generate-001",
@@ -135,7 +135,7 @@ class GeminiGenerator:
                 )
             )
 
-            # Extract image bytes from response (FIXED: was interaction_img.output_image.data)
+            # Extract image bytes from response
             image_bytes = None
             if response.candidates:
                 for part in response.candidates[0].content.parts:
@@ -149,14 +149,14 @@ class GeminiGenerator:
 
             logger.info(f"✅ Image generated: {len(image_bytes)} bytes")
 
-            # Generate caption using Gemini 2.5 Flash (text model)
+            # FIXED: Generate caption using Gemini 2.5 Flash - using models.generate_content instead of interactions.create
             logger.info(f"📝 Generating caption for category: {category}")
-            interaction_cap = self.client.interactions.create(
+            cap_response = self.client.models.generate_content(
                 model="gemini-2.5-flash",
-                input=caption_prompt
+                contents=caption_prompt
             )
 
-            caption = interaction_cap.output_text.strip() if interaction_cap.output_text else f"2050 දී ශ්‍රී ලංකාවේ {category} #SriLanka2050 #FutureSriLanka"
+            caption = cap_response.text.strip() if cap_response.text else f"2050 දී ශ්‍රී ලංකාවේ {category} #SriLanka2050 #FutureSriLanka"
 
             return image_bytes, caption
 
@@ -266,7 +266,7 @@ class GeminiGenerator:
         """
 
         def _generate_single_image(prompt: str, label: str) -> Optional[bytes]:
-            """Helper to generate one image using Imagen 3.0 (FIXED)"""
+            """Helper to generate one image using Imagen 3.0"""
             try:
                 logger.info(f"[{label}] Generating...")
                 response = self.client.models.generate_content(
@@ -290,18 +290,18 @@ class GeminiGenerator:
         try:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
 
-            # Generate 3 images using Imagen 3.0 (FIXED: was gemini-3.1-flash-image)
+            # Generate 3 images using Imagen 3.0
             past_bytes = _generate_single_image(past_prompt, "1/3 Past")
             future_bytes = _generate_single_image(future_prompt, "2/3 Future 2050")
             destruction_bytes = _generate_single_image(destruction_prompt, "3/3 Destruction")
 
-            # Generate caption using text model
+            # FIXED: Generate caption using text model - using models.generate_content instead of interactions.create
             logger.info(f"📝 Generating Sinhala caption...")
-            interaction_cap = self.client.interactions.create(
+            cap_response = self.client.models.generate_content(
                 model="gemini-2.5-flash",
-                input=caption_prompt
+                contents=caption_prompt
             )
-            caption = interaction_cap.output_text.strip() if interaction_cap.output_text else f"{place} - අතීතය, 2050 අනාගතය, සහ විනාශය #HeritageProtection #SriLanka"
+            caption = cap_response.text.strip() if cap_response.text else f"{place} - අතීතය, 2050 අනාගතය, සහ විනාශය #HeritageProtection #SriLanka"
 
             return past_bytes, future_bytes, destruction_bytes, caption
 
@@ -524,7 +524,7 @@ class PostScheduler:
         # ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 10ක්
         sl_times = [
             "07:30", "08:45", "10:00", "11:15", "13:30",
-            "14:00", "15:30", "17:00", "18:45", "20:30"
+            "14:00", "15:30", "17:00", "18:45", "21:37"
         ]
         
         if today not in self.schedule_data:
@@ -544,7 +544,7 @@ class PostScheduler:
             return self.schedule_data[today]["historical_times"]
         
         # ශ්‍රී ලංකා වේලාවට (SLST) නිශ්චිත වේලාවන් 3ක්
-        sl_times = ["13:32", "13:34", "13:36"]
+        sl_times = ["21:38", "21:40", "21:42"]
         
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
@@ -751,47 +751,54 @@ class SriLanka2050Bot:
 
 
 # ============================================================
-# 7. SCHEDULE SETUP & MAIN LOOP
+# 7. SCHEDULE SETUP & MAIN LOOP (FIXED)
 # ============================================================
 
 def setup_schedules(bot: SriLanka2050Bot):
     """Set up the daily schedule."""
     
-    def check_and_run_category():
-        now = datetime.now().strftime("%H:%M")
-        scheduled_times = bot.scheduler.get_daily_category_schedule()
-        
-        if now in scheduled_times:
-            for i, cat in enumerate(bot.categories):
-                if not bot.scheduler.is_posted_today("category", cat):
-                    logger.info(f"⏰ Scheduled time reached: {now} ශ්‍රී ලංකා වේලාව")
-                    bot.run_category_post(i)
-                    return
-            logger.info(f"All categories posted for today at {now}")
-
-    def check_and_run_historical():
-        now = datetime.now().strftime("%H:%M")
-        scheduled_times = bot.scheduler.get_daily_historical_schedule()
-        
-        if now in scheduled_times:
-            logger.info(f"⏰ Scheduled historical time reached: {now} ශ්‍රී ලංකා වේලාව")
-            for i, (place_si, place_en) in enumerate(bot.historical_places):
-                identifier = f"{place_si} ({place_en})"
-                if not bot.scheduler.is_posted_today("historical", identifier):
-                    bot.run_historical_post(i)
-                    return
-            logger.info(f"All historical places posted for today at {now}")
-
-    schedule.every(5).minutes.do(check_and_run_category)
-    schedule.every(5).minutes.do(check_and_run_historical)
+    # FIXED: Use schedule.every().day.at() for precise time scheduling
+    # This ensures posts happen at the EXACT scheduled time, not just checking every 5 minutes
     
-    check_and_run_category()
-    check_and_run_historical()
-
-    logger.info("✅ Schedule system initialized")
+    # Category posts - schedule at precise times
+    category_times = bot.scheduler.get_daily_category_schedule()
+    for i, time_str in enumerate(category_times):
+        # Use closure to capture the correct index
+        schedule.every().day.at(time_str).do(
+            lambda idx=i: scheduled_category_post(bot, idx)
+        )
     
-    # Print the daily schedule with times
-    logger.info(bot.scheduler.get_pending_summary(bot.categories, bot.historical_places))
+    # Historical posts - schedule at precise times
+    historical_times = bot.scheduler.get_daily_historical_schedule()
+    for time_str in historical_times:
+        schedule.every().day.at(time_str).do(
+            lambda: scheduled_historical_post(bot)
+        )
+
+
+def scheduled_category_post(bot: SriLanka2050Bot, index: int):
+    """Run a single category post at the scheduled time"""
+    if index < len(bot.categories):
+        category = bot.categories[index]
+        if not bot.scheduler.is_posted_today("category", category):
+            logger.info(f"⏰ Scheduled time reached for category: {category}")
+            bot.run_category_post(index)
+        else:
+            logger.info(f"⏭️ Category already posted today: {category}")
+    return schedule.CancelJob  # Run once per day
+
+
+def scheduled_historical_post(bot: SriLanka2050Bot):
+    """Run the next historical post at the scheduled time"""
+    for i, (place_si, place_en) in enumerate(bot.historical_places):
+        identifier = f"{place_si} ({place_en})"
+        if not bot.scheduler.is_posted_today("historical", identifier):
+            logger.info(f"⏰ Scheduled time reached for historical: {identifier}")
+            bot.run_historical_post(i)
+            return schedule.CancelJob  # Run once per day
+    
+    logger.info("✅ All historical places posted for today!")
+    return schedule.CancelJob
 
 
 # ============================================================
