@@ -528,6 +528,15 @@ class SriLanka2050Bot:
 # 7. SCHEDULE SETUP
 # ============================================================
 
+def setup_schedules(bot):
+    category_times = bot.scheduler.get_daily_category_schedule()
+    for i, time_str in enumerate(category_times):
+        schedule.every().day.at(time_str).do(lambda idx=i: scheduled_category_post(bot, idx))
+    
+    historical_times = bot.scheduler.get_daily_historical_schedule()
+    for time_str in historical_times:
+        schedule.every().day.at(time_str).do(lambda: scheduled_historical_post(bot))
+
 def scheduled_category_post(bot, index):
     if index < len(bot.categories):
         if not bot.scheduler.is_posted_today("category", bot.categories[index]):
@@ -543,15 +552,6 @@ def scheduled_historical_post(bot):
             bot.run_historical_post(i)
             return schedule.CancelJob
     return schedule.CancelJob
-
-def setup_schedules(bot):
-    category_times = bot.scheduler.get_daily_category_schedule()
-    for i, time_str in enumerate(category_times):
-        schedule.every().day.at(time_str).do(lambda idx=i: scheduled_category_post(bot, idx))
-    
-    historical_times = bot.scheduler.get_daily_historical_schedule()
-    for time_str in historical_times:
-        schedule.every().day.at(time_str).do(lambda: scheduled_historical_post(bot))
 
 
 # ============================================================
@@ -625,7 +625,8 @@ if __name__ == "__main__":
             for i, (place_si, place_en) in enumerate(bot.historical_places):
                 if not bot.scheduler.is_posted_today("historical", f"{place_si} ({place_en})"):
                     bot.run_historical_post(i)
-                    return
+                    import sys as _sys
+                    _sys.exit(0)
         elif sys.argv[1] == "--schedule":
             print("Bot running - check logs")
         else:
