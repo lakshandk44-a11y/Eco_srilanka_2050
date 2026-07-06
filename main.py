@@ -79,18 +79,18 @@ class GeminiGenerator:
         try:
             logger.info(f"🎨 Generating image via Gemini 2.5 Flash...")
             
-            generation_config = types.GenerationConfig(
+            generate_content_config = types.GenerateContentConfig(
                 temperature=1.0,
                 top_p=0.95,
                 top_k=40,
                 max_output_tokens=8192,
-                response_modalities=["Text", "Image"]
+                response_modalities=["TEXT", "IMAGE"]
             )
 
             response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-flash-image",
                 contents=prompt,
-                config=generation_config
+                config=generate_content_config
             )
 
             if response and response.candidates:
@@ -188,7 +188,7 @@ class GeminiGenerator:
         future_prompt = f"""
         Generate a photorealistic image of {place} ({place_en}), Sri Lanka in 2050
         with sustainable development and preservation. Heritage site preserved,
-        solar-powered facilities discreetly placed, electric autonomous shuttles,
+        solar-powered facilities discretely placed, electric autonomous shuttles,
         smart preservation systems, reforested surrounding areas, green technology,
         clear blue sky with fluffy white clouds, cinematic golden hour lighting,
         8K ultra realistic photography, harmonious sustainable future.
@@ -443,7 +443,7 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["23:59", "21:40", "21:42"]
+        sl_times = ["07:11", "07:13", "07:15"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
