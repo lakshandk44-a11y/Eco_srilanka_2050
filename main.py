@@ -166,70 +166,100 @@ class GeminiGenerator:
         logger.info(f"🔄 Retrying scheduled image generation for: {schedule_key}")
         return self.generate_image_via_pollinations(prompt)
 
-    def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
-        """Generate image and caption for a category post."""
-        image_prompt = f"""
-        Generate a photorealistic ultra-high quality image of Sri Lanka in 2050.
-        Category: {category}
-        Make it look like a REAL photograph with 8K resolution quality.
-        Cinematic lighting with natural golden hour, clear blue sky, fluffy white clouds,
-        lush tropical vegetation, modern sustainable infrastructure.
+    def generate_new_historical_place(self, used_places: List[str]) -> Tuple[str, str]:
+        """
+        Asks Gemini for ONE real, famous historical/cultural/natural heritage site in
+        Sri Lanka that is NOT in used_places (so the bot never repeats a place, with
+        no fixed list - it can keep finding new places for as long as it runs).
+        Returns (place_name_sinhala, place_name_english).
+        """
+        used_list_str = ", ".join(used_places) if used_places else "none yet"
+        prompt = f"""
+        You help run a Facebook page about Sri Lanka's heritage sites.
+        Give me ONE real, well-known historical, cultural, religious, or natural
+        heritage site in Sri Lanka that has NOT been used before.
+
+        Sites already used - do NOT repeat any of these: {used_list_str}
+
+        Respond with EXACTLY one line, nothing else, in this exact format:
+        SinhalaName|EnglishName
+
+        Example of the exact format expected: සීගිරිය|Sigiriya
+
+        Do not add numbering, explanations, or markdown - just the single line.
         """
 
-        caption_prompt = f"""
-        Write a SINGLE engaging Facebook post caption in Sinhala language for an image
-        showing '{category}' in Sri Lanka in 2050.
+        for attempt in range(5):
+            try:
+                response = self.client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt
+                )
+                text = response.text.strip() if response.text else ""
+                first_line = text.splitlines()[0].strip() if text else ""
 
-        Requirements:
-        - Write ONLY the caption text, no explanations
-        - 3-5 sentences describing the image and its future vision
-        - Inspiring and positive tone
-        - At the end, include 8-10 relevant hashtags in both Sinhala and English
-        - Hashtags should include: #SriLanka2050 #FutureSriLanka and relevant others
-        - Make it emotional and thought-provoking for Sri Lankan audience
-        - DO NOT use any markdown formatting like ** or ##
-        - Use simple, flowing Sinhala language
+                if "|" in first_line:
+                    place_si, place_en = first_line.split("|", 1)
+                    place_si = place_si.strip()
+                    place_en = place_en.strip()
+                    if place_en and place_en not in used_places:
+                        logger.info(f"🆕 New historical place picked: {place_si} ({place_en})")
+                        return place_si, place_en
+                    else:
+                        logger.warning(f"⚠️ Gemini repeated an already-used place ({place_en}), retrying...")
+                else:
+                    logger.warning(f"⚠️ Unexpected format from Gemini: '{text}', retrying...")
+            except Exception as e:
+                logger.warning(f"⚠️ Place generation attempt {attempt+1} failed: {e}")
+            time.sleep(5)
+
+        # Fallback so the bot never gets permanently stuck if Gemini keeps failing/repeating
+        fallback_en = f"Sri Lanka Heritage Site {int(time.time())}"
+        logger.error(f"❌ Could not get a unique place from Gemini after retries, using fallback: {fallback_en}")
+        return "ශ්‍රී ලංකා උරුම ස්ථානය", fallback_en
+
+    def generate_place_visual_description(self, place_si: str, place_en: str) -> str:
         """
+        Asks Gemini for a factual visual description of how this REAL place actually
+        looks (architecture, colors, materials, layout, surroundings, landmarks).
+        This description is injected into every image prompt for this place so the
+        generated images accurately match the real place instead of being generic.
+        """
+        prompt = f"""
+        Describe the REAL, factual visual appearance of {place_en} ({place_si}) in Sri Lanka,
+        to be used as a reference for AI image generation. Only describe what this exact
+        place genuinely looks like in real life.
 
+        Cover in 4-6 concise sentences, plain text, no markdown:
+        - Its distinctive architecture, structures, or natural landform
+        - Key colors and materials (stone type, brick, paint, vegetation, water, etc.)
+        - Layout and surroundings (terrain, water bodies, forest, urban context)
+        - Any unique, instantly recognizable visual features that make it identifiable
+
+        Write ONLY the description, nothing else - no intro, no title.
+        """
         try:
-            image_bytes = self.generate_image_via_pollinations(image_prompt)
-
-            if not image_bytes:
-                logger.error(f"No image generated for category: {category}")
-                return None, None
-
-            logger.info(f"📝 Generating caption for category: {category}")
-            caption = None
-            
-            for attempt in range(3):
-                try:
-                    cap_response = self.client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=caption_prompt
-                    )
-                    caption = cap_response.text.strip() if cap_response.text else None
-                    if caption:
-                        break
-                except Exception as cap_e:
-                    wait_time = (attempt + 1) * 5
-                    logger.warning(f"⚠️ Caption attempt {attempt+1} failed. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-
-            if not caption:
-                caption = f"2050 දී ශ්‍රී ලංකාවේ {category} #SriLanka2050 #FutureSriLanka"
-
-            return image_bytes, caption
-
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+            description = response.text.strip() if response.text else ""
+            if description:
+                logger.info(f"📋 Got visual description for {place_en} ({place_si})")
+                return description
         except Exception as e:
-            logger.error(f"Generation error for {category}: {e}")
-            return None, None
+            logger.warning(f"⚠️ Could not get visual description for {place_en}: {e}")
+        return ""
 
-    def generate_historical_future_images(self, place: str, place_en: str) -> Tuple[Optional[bytes], Optional[bytes], Optional[bytes], Optional[str]]:
+    def generate_historical_future_images(self, place: str, place_en: str, visual_description: str = "") -> Tuple[Optional[bytes], Optional[bytes], Optional[bytes], Optional[str]]:
         """Generate 3 images for a historical place using pollinations.ai."""
-        
+
+        reference_line = f"\n        Accurate real-world visual reference for this exact place: {visual_description}\n" if visual_description else ""
+
         past_prompt = f"""
         Generate a historically accurate photograph of {place} ({place_en}), Sri Lanka
-        in its original golden age. National Geographic documentary style,
+        in its original golden age.{reference_line}
+        National Geographic documentary style,
         historically accurate architecture and structures, natural lighting,
         golden hour warm sunlight creating dramatic shadows,
         vintage film quality, lush greenery, photorealistic.
@@ -237,7 +267,8 @@ class GeminiGenerator:
 
         future_prompt = f"""
         Generate a photorealistic image of {place} ({place_en}), Sri Lanka in 2050
-        with sustainable development and preservation. Heritage site preserved,
+        with sustainable development and preservation.{reference_line}
+        Heritage site preserved,
         solar-powered facilities discreetly placed, electric autonomous shuttles,
         smart preservation systems, reforested surrounding areas, green technology,
         clear blue sky with fluffy white clouds, cinematic golden hour lighting,
@@ -246,7 +277,8 @@ class GeminiGenerator:
 
         destruction_prompt = f"""
         Generate a photorealistic devastating environmental destruction of {place} ({place_en}), 
-        Sri Lanka. Plastic waste piles, garbage, graffiti on ancient walls,
+        Sri Lanka.{reference_line}
+        Plastic waste piles, garbage, graffiti on ancient walls,
         dry cracked mud, toxic green algae, dead brown trees, polluted grey sky,
         muted desaturated colors, photojournalism style, wide angle lens
         showing full scale of destruction, ultra realistic.
@@ -283,6 +315,7 @@ class GeminiGenerator:
 
         try:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
+
 
             past_bytes = _generate_single_image(past_prompt, "1/3 Past")
             time.sleep(60)
@@ -321,13 +354,16 @@ class GeminiGenerator:
             logger.error(f"Generation error for {place}: {e}")
             return None, None, None, None
 
-    def generate_single_historical_image(self, place: str, place_en: str, image_type: str, schedule_time: str = None) -> Tuple[Optional[bytes], Optional[str]]:
+    def generate_single_historical_image(self, place: str, place_en: str, image_type: str, schedule_time: str = None, visual_description: str = "") -> Tuple[Optional[bytes], Optional[str]]:
         """Generate a single image for a historical place with its own caption."""
-        
+
+        reference_line = f"\n            Accurate real-world visual reference for this exact place: {visual_description}\n" if visual_description else ""
+
         if image_type == "past":
             image_prompt = f"""
             Generate a historically accurate photograph of {place} ({place_en}), Sri Lanka
-            in its original golden age. National Geographic documentary style,
+            in its original golden age.{reference_line}
+            National Geographic documentary style,
             historically accurate architecture and structures, natural lighting,
             golden hour warm sunlight creating dramatic shadows,
             vintage film quality, lush greenery, photorealistic.
@@ -348,7 +384,8 @@ class GeminiGenerator:
         elif image_type == "future":
             image_prompt = f"""
             Generate a photorealistic image of {place} ({place_en}), Sri Lanka in 2050
-            with sustainable development and preservation. Heritage site preserved,
+            with sustainable development and preservation.{reference_line}
+            Heritage site preserved,
             solar-powered facilities discreetly placed, electric autonomous shuttles,
             smart preservation systems, reforested surrounding areas, green technology,
             clear blue sky with fluffy white clouds, cinematic golden hour lighting,
@@ -370,7 +407,8 @@ class GeminiGenerator:
         else:  # destruction
             image_prompt = f"""
             Generate a photorealistic devastating environmental destruction of {place} ({place_en}), 
-            Sri Lanka. Plastic waste piles, garbage, graffiti on ancient walls,
+            Sri Lanka.{reference_line}
+            Plastic waste piles, garbage, graffiti on ancient walls,
             dry cracked mud, toxic green algae, dead brown trees, polluted grey sky,
             muted desaturated colors, photojournalism style, wide angle lens
             showing full scale of destruction, ultra realistic.
@@ -585,24 +623,13 @@ class PostScheduler:
             return identifier in self.posted_log[today].get("historical", [])
         return False
 
-    def get_daily_category_schedule(self):
-        today = datetime.now().strftime("%Y-%m-%d")
-        if today in self.schedule_data and "category_times" in self.schedule_data[today]:
-            return self.schedule_data[today]["category_times"]
-        sl_times = ["07:30", "08:45", "10:00", "11:15", "13:30", "14:00", "15:30", "17:00", "18:45", "21:37"]
-        if today not in self.schedule_data:
-            self.schedule_data[today] = {}
-        self.schedule_data[today]["category_times"] = sl_times
-        self._save_json(self.schedule_data, self.schedule_file)
-        return sl_times
-
     def get_daily_historical_schedule(self):
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
         # FIX: the original literal had a broken/unterminated string ("12:08 was missing its
         # closing quote), which is a SyntaxError that stops the whole script from starting.
-        sl_times = ["12:22", "12:24", "12:26"]
+        sl_times = ["12:06", "12:08", "12:10"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
@@ -616,15 +643,46 @@ class PostScheduler:
             return self.schedule_data[today]["historical_image_times"]
         # Default: past at 08:40, future at 21:40, destruction at 21:42
         image_times = [
-            {"time": "12:27", "image_type": "past"},
-            {"time": "12:43", "image_type": "future"},
-            {"time": "12:46", "image_type": "destruction"}
+            {"time": "13:08", "image_type": "past"},
+            {"time": "13:10", "image_type": "future"},
+            {"time": "13:12", "image_type": "destruction"}
         ]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_image_times"] = image_times
         self._save_json(self.schedule_data, self.schedule_file)
         return image_times
+
+    def get_cached_today_place(self):
+        """Returns today's already-picked place (si, en, description) if one was picked, else None."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today in self.schedule_data and "historical_place_si" in self.schedule_data[today]:
+            return (
+                self.schedule_data[today]["historical_place_si"],
+                self.schedule_data[today]["historical_place_en"],
+                self.schedule_data[today].get("historical_place_description", "")
+            )
+        return None
+
+    def get_used_place_names(self):
+        """Returns the list of English place names that have already been used (ever), so a new one never repeats."""
+        return self.schedule_data.get("_used_historical_places", [])
+
+    def save_today_place(self, place_si, place_en, description=""):
+        """Saves today's picked place (with its visual description) and permanently records it as used so it's never picked again."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today not in self.schedule_data:
+            self.schedule_data[today] = {}
+        self.schedule_data[today]["historical_place_si"] = place_si
+        self.schedule_data[today]["historical_place_en"] = place_en
+        self.schedule_data[today]["historical_place_description"] = description
+
+        used = self.schedule_data.get("_used_historical_places", [])
+        if place_en not in used:
+            used.append(place_en)
+        self.schedule_data["_used_historical_places"] = used
+
+        self._save_json(self.schedule_data, self.schedule_file)
 
     def mark_historical_image_posted(self, place_identifier, image_type):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -658,60 +716,32 @@ class SriLanka2050Bot:
         self.gemini = GeminiGenerator(GEMINI_API_KEY)
         self.facebook = FacebookPublisher(FACEBOOK_PAGE_ID, FACEBOOK_PAGE_ACCESS_TOKEN)
         self.scheduler = PostScheduler()
-        
-        self.categories = [
-            "ආර්ථිකය (Economy)",
-            "අධ්‍යාපනය (Education)",
-            "තාක්ෂණික දියුණුව (Technology)",
-            "හරිත නගර (Green Cities)",
-            "පුනර්ජනනීය බලශක්තිය (Renewable Energy)",
-            "සංස්කෘතිය (Culture)",
-            "ප්‍රවාහනය (Transportation)",
-            "කෘෂිකර්මය (Agriculture)",
-            "සෞඛ්‍ය සේවා (Healthcare)",
-            "සංචාරක කර්මාන්තය (Tourism)"
-        ]
-        
-        self.historical_places = [
-            ("සීගිරිය", "Sigiriya"),
-            ("ගාල්ල කොටුව", "Galle Fort"),
-            ("ශ්‍රී මහා බෝධිය", "Sri Maha Bodhiya"),
-            ("යාපනය බලකොටුව", "Jaffna Fort"),
-            ("මිහින්තලය", "Mihintale"),
-            ("දඹුල්ල රජ මහා විහාරය", "Dambulla Cave Temple"),
-            ("කැළණිය රජ මහා විහාරය", "Kelaniya Temple"),
-            ("පොළොන්නරුව", "Polonnaruwa"),
-            ("කොළඹ වරාය", "Colombo Port"),
-            ("නුවරඑළිය", "Nuwara Eliya")
-        ]
 
-    def run_category_post(self, category_index):
-        if category_index < 0 or category_index >= len(self.categories):
-            return False
-        category = self.categories[category_index]
-        if self.scheduler.is_posted_today("category", category):
-            return False
-        
-        image_bytes, caption = self.gemini.generate_category_image(category)
-        if not image_bytes:
-            return False
-        if not caption:
-            caption = f"2050 දී ශ්‍රී ලංකාවේ {category} #SriLanka2050 #FutureSriLanka"
-        
-        success = self.facebook.post_single_image(image_bytes, caption)
-        if success:
-            self.scheduler.mark_posted("category", category)
-        return success
+    def get_todays_place(self):
+        """
+        Returns today's historical place (place_si, place_en, visual_description). If a
+        place was already picked today, reuses it (so past/future/destruction stay
+        consistent). Otherwise asks Gemini for a brand-new real Sri Lankan heritage site
+        that has never been used before, plus a factual visual description of it, and
+        remembers both permanently so the place is never repeated again.
+        """
+        cached = self.scheduler.get_cached_today_place()
+        if cached:
+            return cached
 
-    def run_historical_post(self, place_index):
-        if place_index < 0 or place_index >= len(self.historical_places):
-            return False
-        place_si, place_en = self.historical_places[place_index]
+        used_places = self.scheduler.get_used_place_names()
+        place_si, place_en = self.gemini.generate_new_historical_place(used_places)
+        description = self.gemini.generate_place_visual_description(place_si, place_en)
+        self.scheduler.save_today_place(place_si, place_en, description)
+        return place_si, place_en, description
+
+    def run_historical_post(self):
+        place_si, place_en, description = self.get_todays_place()
         identifier = f"{place_si} ({place_en})"
         if self.scheduler.is_posted_today("historical", identifier):
             return False
         
-        past_img, future_img, destruction_img, caption = self.gemini.generate_historical_future_images(place_si, place_en)
+        past_img, future_img, destruction_img, caption = self.gemini.generate_historical_future_images(place_si, place_en, description)
         images = [img for img in [past_img, future_img, destruction_img] if img is not None]
         if len(images) < 2:
             return False
@@ -723,11 +753,8 @@ class SriLanka2050Bot:
             self.scheduler.mark_posted("historical", identifier)
         return success
 
-    def run_historical_single_image_post(self, place_index, image_type, schedule_time=None):
+    def run_historical_single_image_post(self, place_si, place_en, image_type, schedule_time=None, description=""):
         """Generate and post a single historical image with its own caption."""
-        if place_index < 0 or place_index >= len(self.historical_places):
-            return False
-        place_si, place_en = self.historical_places[place_index]
         identifier = f"{place_si} ({place_en})"
         
         if self.scheduler.is_historical_image_posted(identifier, image_type):
@@ -735,7 +762,7 @@ class SriLanka2050Bot:
             return False
         
         logger.info(f"🏛️ Generating {image_type} image for: {place_si} ({place_en})")
-        image_bytes, caption = self.gemini.generate_single_historical_image(place_si, place_en, image_type, schedule_time)
+        image_bytes, caption = self.gemini.generate_single_historical_image(place_si, place_en, image_type, schedule_time, description)
         
         if not image_bytes:
             logger.error(f"❌ Failed to generate {image_type} image for {identifier}")
@@ -760,47 +787,27 @@ class SriLanka2050Bot:
 # ============================================================
 
 def setup_schedules(bot):
-    category_times = bot.scheduler.get_daily_category_schedule()
-    for i, time_str in enumerate(category_times):
-        schedule.every().day.at(time_str).do(lambda idx=i: scheduled_category_post(bot, idx))
-    
     historical_image_times = bot.scheduler.get_historical_image_schedule()
     for entry in historical_image_times:
         time_str = entry["time"]
         image_type = entry["image_type"]
         schedule.every().day.at(time_str).do(lambda it=image_type, ts=time_str: scheduled_historical_single_image_post(bot, it, ts))
 
-def scheduled_category_post(bot, index):
-    if index < len(bot.categories):
-        if not bot.scheduler.is_posted_today("category", bot.categories[index]):
-            logger.info(f"⏰ Scheduled time reached for category: {bot.categories[index]}")
-            bot.run_category_post(index)
-    # FIX: previously this always returned schedule.CancelJob, which permanently removed the
-    # daily job from the scheduler after its very first run. That meant this category's time
-    # slot would never fire again on any future day (and if the post failed the first time,
-    # it would never be retried at all). Now the job simply keeps recurring every day; the
-    # is_posted_today() check above already prevents duplicate posts on the same day.
-    return None
-
-def scheduled_historical_post(bot):
-    for i, (place_si, place_en) in enumerate(bot.historical_places):
-        identifier = f"{place_si} ({place_en})"
-        if not bot.scheduler.is_posted_today("historical", identifier):
-            logger.info(f"⏰ Scheduled time reached for historical: {identifier}")
-            bot.run_historical_post(i)
-            return None
-    return None
-
 def scheduled_historical_single_image_post(bot, image_type, schedule_time):
-    """Find next unposted historical place and post its single image."""
-    for i, (place_si, place_en) in enumerate(bot.historical_places):
-        identifier = f"{place_si} ({place_en})"
-        if not bot.scheduler.is_historical_image_posted(identifier, image_type):
-            logger.info(f"⏰ Scheduled time reached for historical {image_type}: {identifier}")
-            bot.run_historical_single_image_post(i, image_type, schedule_time)
-            # FIX: same CancelJob issue as above - removed so this time slot keeps recurring daily.
-            return None
-    logger.info(f"✅ All {image_type} images posted for all historical places today")
+    """
+    Post the image_type (past/future/destruction) for TODAY's chosen historical place.
+    The place is picked fresh via Gemini once per day (no fixed list - a brand-new real
+    place every day, never repeated) so that all 3 image types on the same day use the
+    same place.
+    """
+    place_si, place_en, description = bot.get_todays_place()
+    identifier = f"{place_si} ({place_en})"
+
+    if not bot.scheduler.is_historical_image_posted(identifier, image_type):
+        logger.info(f"⏰ Scheduled time reached for historical {image_type}: {identifier}")
+        bot.run_historical_single_image_post(place_si, place_en, image_type, schedule_time, description)
+    else:
+        logger.info(f"⏭️ {image_type} already posted today for {identifier}")
     return None
 
 
@@ -860,26 +867,17 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
         bot = SriLanka2050Bot()
-        if sys.argv[1] == "--test-category":
-            bot.run_category_post(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
-        elif sys.argv[1] == "--test-historical":
-            bot.run_historical_post(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
+        if sys.argv[1] == "--test-historical":
+            bot.run_historical_post()
         elif sys.argv[1] == "--test-historical-single":
             img_type = sys.argv[2] if len(sys.argv) > 2 else "past"
-            bot.run_historical_single_image_post(int(sys.argv[3]) if len(sys.argv) > 3 else 0, img_type)
-        elif sys.argv[1] == "--full-category":
-            for i in range(len(bot.categories)):
-                bot.run_category_post(i)
-                time.sleep(random.randint(30, 90))
+            place_si, place_en, description = bot.get_todays_place()
+            bot.run_historical_single_image_post(place_si, place_en, img_type, description=description)
         elif sys.argv[1] == "--full-historical":
-            for i, (place_si, place_en) in enumerate(bot.historical_places):
-                if not bot.scheduler.is_posted_today("historical", f"{place_si} ({place_en})"):
-                    bot.run_historical_post(i)
-                    import sys as _sys
-                    _sys.exit(0)
+            bot.run_historical_post()
         elif sys.argv[1] == "--schedule":
             print("Bot running - check logs")
         else:
-            print("Usage: python bot.py [--test-category N|--test-historical N|--test-historical-single TYPE N|--full-category|--full-historical]")
+            print("Usage: python bot.py [--test-historical|--test-historical-single TYPE|--full-historical]")
     else:
         main()
