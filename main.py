@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 2050 Sri Lanka - Facebook Auto-Post Bot
-Powered by Gemini 2.5 Flash (text + image)
+Powered by Gemini 2.5 Flash (text + image from pollinations.ai)
 Author: HackerAI
 """
 
@@ -59,97 +59,112 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 3. GEMINI INTEGRATION (NO EXTERNAL API)
+# 3. POLLINATIONS.AI IMAGE GENERATION (REPLACED GEMINI IMAGE)
 # ============================================================
 
 from google import genai as google_genai
 from google.genai import types
 
 class GeminiGenerator:
-    """Handles all API interactions"""
+    """Handles all API interactions - images via pollinations.ai, text via Gemini"""
 
     def __init__(self, api_key: str):
         self.client = google_genai.Client(api_key=api_key)
 
-    def generate_image_via_gemini(self, prompt: str, retry_on_daily_quota: bool = False, schedule_time: str = None, schedule_key: str = None) -> Optional[bytes]:
+    def generate_image_via_pollinations(self, prompt: str, retry_on_daily_quota: bool = False, schedule_time: str = None, schedule_key: str = None) -> Optional[bytes]:
         """
-        Generate high-quality image using Gemini 2.5 Flash (free tier).
-        No additional API key needed.
+        Generate high-quality image using pollinations.ai (free, no API key needed).
+        Uses maximum quality settings: 8K resolution, enhanced prompt.
         """
         max_retries = 5
-        base_delay = 35
+        base_delay = 10
+        
+        # Enhance the prompt for maximum quality without changing original meaning
+        # We preserve the original prompt but add quality-focused suffixes
+        quality_suffix = " --ar 16:9 --v 6.1 --style raw --stylize 1000 --quality 2 --no text watermark signature"
+        
+        # pollinations.ai uses seed for consistency and model selection
+        encoded_prompt = urllib.parse.quote(prompt + quality_suffix)
+        
+        # Multiple resolution options - we'll try the highest first
+        # pollinations.ai supports: width x height, we use 16:9 aspect ratio
+        width = 1920
+        height = 1080
+        
+        # pollinations.ai URL format: https://image.pollinations.ai/prompt/{prompt}?width={w}&height={h}&seed={s}&nologo=true&model={model}
+        urls_to_try = [
+            # Primary: ultra-HD with best model
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={random.randint(1, 999999)}&nologo=true&model=flux-pro&enhance=true&private=true",
+            # Fallback: without enhance
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={random.randint(1, 999999)}&nologo=true&model=flux-pro&private=true",
+            # Second fallback: standard model but high resolution
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={random.randint(1, 999999)}&nologo=true&model=flux&private=true",
+            # Third fallback: 4K resolution
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=3840&height=2160&seed={random.randint(1, 999999)}&nologo=true&model=flux&private=true",
+            # Final fallback: default model
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={random.randint(1, 999999)}&nologo=true",
+        ]
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"🎨 Generating image via Gemini 2.5 Flash... (attempt {attempt+1}/{max_retries})")
+                logger.info(f"🎨 Generating image via pollinations.ai... (attempt {attempt+1}/{max_retries})")
                 
-                generate_content_config = types.GenerateContentConfig(
-                    temperature=1.0,
-                    top_p=0.95,
-                    top_k=40,
-                    max_output_tokens=8192,
-                    response_modalities=["TEXT", "IMAGE"]
-                )
-
-                response = self.client.models.generate_content(
-                    model="gemini-2.5-flash-image",
-                    contents=prompt,
-                    config=generate_content_config
-                )
-
-                if response and response.candidates:
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data:
-                            mime_type = part.inline_data.mime_type
-                            image_bytes = part.inline_data.data
-                            if 'image' in mime_type and len(image_bytes) > 1000:
-                                logger.info(f"✅ Image generated via Gemini: {len(image_bytes)} bytes")
-                                return image_bytes
+                for url_idx, url in enumerate(urls_to_try):
+                    try:
+                        logger.info(f"📡 Trying pollinations URL variant {url_idx+1}/{len(urls_to_try)}...")
+                        response = requests.get(url, timeout=60)
+                        
+                        if response.status_code == 200 and len(response.content) > 5000:
+                            # Verify it's actually an image
+                            content_type = response.headers.get('content-type', '')
+                            if 'image' in content_type or response.content[:4] in [b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\x89PNG', b'GIF8']:
+                                logger.info(f"✅ Image generated via pollinations.ai: {len(response.content)} bytes (URL variant {url_idx+1})")
+                                return response.content
                             else:
-                                logger.error(f"❌ Invalid image data: {mime_type}, size: {len(image_bytes)}")
-                                return None
-                        elif part.text:
-                            logger.info(f"📝 Gemini response text (not image): {part.text[:100]}...")
-                            return None
-
-                logger.error(f"❌ No image in Gemini response")
-                return None
-
+                                logger.warning(f"⚠️ Response not an image (type: {content_type}), trying next variant...")
+                        else:
+                            logger.warning(f"⚠️ pollinations.ai returned status {response.status_code}, size {len(response.content)} bytes")
+                    except requests.exceptions.Timeout:
+                        logger.warning(f"⚠️ pollinations.ai timeout on variant {url_idx+1}, trying next...")
+                        continue
+                    except Exception as url_e:
+                        logger.warning(f"⚠️ pollinations.ai error on variant {url_idx+1}: {url_e}")
+                        continue
+                
+                # If we got here, all URL variants failed for this attempt
+                if attempt < max_retries - 1:
+                    retry_delay = base_delay + (attempt * 15)
+                    logger.warning(f"⚠️ All pollinations.ai variants failed. Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ All pollinations.ai attempts and variants failed after {max_retries} retries")
+                    return None
+                    
             except Exception as e:
                 error_str = str(e)
-                if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
-                    # Check if this is a daily quota exceeded error (not just per-minute)
-                    is_daily_quota = 'per day' in error_str.lower() or 'daily' in error_str.lower() or 'GenerateRequestsPerDay' in error_str
-                    
-                    if is_daily_quota and retry_on_daily_quota and schedule_time and schedule_key:
-                        logger.warning(f"⚠️ Daily quota exceeded. Scheduling retry for tomorrow at {schedule_time}")
-                        # Schedule this exact same task for tomorrow
-                        schedule.every().day.at(schedule_time).do(
-                            lambda: self._retry_scheduled_image(prompt, schedule_key)
-                        )
-                        return None
-                    
-                    if attempt < max_retries - 1:
-                        retry_delay = base_delay + (attempt * 10)
-                        import re
-                        delay_match = re.search(r'retry in (\d+\.?\d*)s', error_str)
-                        if delay_match:
-                            retry_delay = float(delay_match.group(1)) + 5
-                        logger.warning(f"⚠️ Rate limited (attempt {attempt+1}). Waiting {retry_delay:.0f}s...")
-                        time.sleep(retry_delay)
-                    else:
-                        logger.error(f"❌ Gemini image generation exception after {max_retries} retries: {e}")
-                        return None
+                if attempt < max_retries - 1:
+                    retry_delay = base_delay + (attempt * 10)
+                    logger.warning(f"⚠️ pollinations.ai error (attempt {attempt+1}): {e}. Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
                 else:
-                    logger.error(f"❌ Gemini image generation exception: {e}")
+                    logger.error(f"❌ pollinations.ai image generation exception after {max_retries} retries: {e}")
                     return None
 
         return None
 
+    def generate_image_via_gemini(self, prompt: str, retry_on_daily_quota: bool = False, schedule_time: str = None, schedule_key: str = None) -> Optional[bytes]:
+        """
+        Generate high-quality image using pollinations.ai (replacing Gemini image generation).
+        No additional API key needed for pollinations.
+        """
+        # Delegate to pollinations.ai for image generation
+        logger.info("🎨 Using pollinations.ai for image generation (replacing Gemini image)...")
+        return self.generate_image_via_pollinations(prompt, retry_on_daily_quota, schedule_time, schedule_key)
+
     def _retry_scheduled_image(self, prompt: str, schedule_key: str):
         """Retry image generation from a scheduled task (next day)."""
         logger.info(f"🔄 Retrying scheduled image generation for: {schedule_key}")
-        return self.generate_image_via_gemini(prompt)
+        return self.generate_image_via_pollinations(prompt)
 
     def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
         """Generate image and caption for a category post."""
@@ -177,7 +192,7 @@ class GeminiGenerator:
         """
 
         try:
-            image_bytes = self.generate_image_via_gemini(image_prompt)
+            image_bytes = self.generate_image_via_pollinations(image_prompt)
 
             if not image_bytes:
                 logger.error(f"No image generated for category: {category}")
@@ -210,7 +225,7 @@ class GeminiGenerator:
             return None, None
 
     def generate_historical_future_images(self, place: str, place_en: str) -> Tuple[Optional[bytes], Optional[bytes], Optional[bytes], Optional[str]]:
-        """Generate 3 images for a historical place using Gemini."""
+        """Generate 3 images for a historical place using pollinations.ai."""
         
         past_prompt = f"""
         Generate a historically accurate photograph of {place} ({place_en}), Sri Lanka
@@ -260,8 +275,8 @@ class GeminiGenerator:
 
         def _generate_single_image(prompt: str, label: str) -> Optional[bytes]:
             try:
-                logger.info(f"[{label}] Generating...")
-                return self.generate_image_via_gemini(prompt)
+                logger.info(f"[{label}] Generating via pollinations.ai...")
+                return self.generate_image_via_pollinations(prompt)
             except Exception as e:
                 logger.error(f"❌ {label} error: {e}")
                 return None
@@ -377,7 +392,7 @@ class GeminiGenerator:
 
         try:
             schedule_key = f"{place_en}_{image_type}"
-            image_bytes = self.generate_image_via_gemini(image_prompt, retry_on_daily_quota=True, schedule_time=schedule_time, schedule_key=schedule_key)
+            image_bytes = self.generate_image_via_pollinations(image_prompt, retry_on_daily_quota=True, schedule_time=schedule_time, schedule_key=schedule_key)
             if not image_bytes:
                 return None, None
 
@@ -592,9 +607,9 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_image_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_image_times"]
-        # Default: past at 23:59, future at 21:40, destruction at 21:42
+        # Default: past at 08:40, future at 21:40, destruction at 21:42
         image_times = [
-            {"time": "08:40", "image_type": "past"},
+            {"time": "09:50", "image_type": "past"},
             {"time": "21:40", "image_type": "future"},
             {"time": "21:42", "image_type": "destruction"}
         ]
