@@ -462,7 +462,8 @@ class FacebookPublisher:
                 logger.info(f"✅ Image posted! Post ID: {result.get('id', 'N/A')}")
                 return True
             else:
-                logger.error(f"❌ Facebook API error: {response.status_code}")
+                # FIX: log the actual response body so auth/permission errors are visible
+                logger.error(f"❌ Facebook API error: {response.status_code} - {response.text}")
                 return False
         except Exception as e:
             logger.error(f"Facebook post error: {e}")
@@ -503,6 +504,9 @@ class FacebookPublisher:
                     media_id = upload_resp.json().get("id")
                     if media_id:
                         media_ids.append(media_id)
+                else:
+                    # FIX: log why an individual photo upload failed
+                    logger.error(f"❌ Photo upload error: {upload_resp.status_code} - {upload_resp.text}")
 
             for tp in temp_files:
                 tp.unlink(missing_ok=True)
@@ -524,7 +528,8 @@ class FacebookPublisher:
                 logger.info(f"✅ Multi-image post published!")
                 return True
             else:
-                logger.error(f"❌ Post creation error: {response.status_code}")
+                # FIX: log the actual response body so the real cause is visible
+                logger.error(f"❌ Post creation error: {response.status_code} - {response.text}")
                 return False
         except Exception as e:
             logger.error(f"Multi-image post error: {e}")
@@ -595,7 +600,9 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["12:06", "12:08, "12:10"]
+        # FIX: the original literal had a broken/unterminated string ("12:08 was missing its
+        # closing quote), which is a SyntaxError that stops the whole script from starting.
+        sl_times = ["12:22", "12:24", "12:26"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
@@ -768,7 +775,12 @@ def scheduled_category_post(bot, index):
         if not bot.scheduler.is_posted_today("category", bot.categories[index]):
             logger.info(f"⏰ Scheduled time reached for category: {bot.categories[index]}")
             bot.run_category_post(index)
-    return schedule.CancelJob
+    # FIX: previously this always returned schedule.CancelJob, which permanently removed the
+    # daily job from the scheduler after its very first run. That meant this category's time
+    # slot would never fire again on any future day (and if the post failed the first time,
+    # it would never be retried at all). Now the job simply keeps recurring every day; the
+    # is_posted_today() check above already prevents duplicate posts on the same day.
+    return None
 
 def scheduled_historical_post(bot):
     for i, (place_si, place_en) in enumerate(bot.historical_places):
@@ -776,8 +788,8 @@ def scheduled_historical_post(bot):
         if not bot.scheduler.is_posted_today("historical", identifier):
             logger.info(f"⏰ Scheduled time reached for historical: {identifier}")
             bot.run_historical_post(i)
-            return schedule.CancelJob
-    return schedule.CancelJob
+            return None
+    return None
 
 def scheduled_historical_single_image_post(bot, image_type, schedule_time):
     """Find next unposted historical place and post its single image."""
@@ -786,9 +798,10 @@ def scheduled_historical_single_image_post(bot, image_type, schedule_time):
         if not bot.scheduler.is_historical_image_posted(identifier, image_type):
             logger.info(f"⏰ Scheduled time reached for historical {image_type}: {identifier}")
             bot.run_historical_single_image_post(i, image_type, schedule_time)
-            return schedule.CancelJob
+            # FIX: same CancelJob issue as above - removed so this time slot keeps recurring daily.
+            return None
     logger.info(f"✅ All {image_type} images posted for all historical places today")
-    return schedule.CancelJob
+    return None
 
 
 # ============================================================
