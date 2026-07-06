@@ -71,7 +71,7 @@ class GeminiGenerator:
     def __init__(self, api_key: str):
         self.client = google_genai.Client(api_key=api_key)
 
-    def generate_image_via_gemini(self, prompt: str) -> Optional[bytes]:
+    def generate_image_via_gemini(self, prompt: str, retry_on_daily_quota: bool = False, schedule_time: str = None, schedule_key: str = None) -> Optional[bytes]:
         """
         Generate high-quality image using Gemini 2.5 Flash (free tier).
         No additional API key needed.
@@ -118,6 +118,17 @@ class GeminiGenerator:
             except Exception as e:
                 error_str = str(e)
                 if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    # Check if this is a daily quota exceeded error (not just per-minute)
+                    is_daily_quota = 'per day' in error_str.lower() or 'daily' in error_str.lower() or 'GenerateRequestsPerDay' in error_str
+                    
+                    if is_daily_quota and retry_on_daily_quota and schedule_time and schedule_key:
+                        logger.warning(f"⚠️ Daily quota exceeded. Scheduling retry for tomorrow at {schedule_time}")
+                        # Schedule this exact same task for tomorrow
+                        schedule.every().day.at(schedule_time).do(
+                            lambda: self._retry_scheduled_image(prompt, schedule_key)
+                        )
+                        return None
+                    
                     if attempt < max_retries - 1:
                         retry_delay = base_delay + (attempt * 10)
                         import re
@@ -134,6 +145,11 @@ class GeminiGenerator:
                     return None
 
         return None
+
+    def _retry_scheduled_image(self, prompt: str, schedule_key: str):
+        """Retry image generation from a scheduled task (next day)."""
+        logger.info(f"🔄 Retrying scheduled image generation for: {schedule_key}")
+        return self.generate_image_via_gemini(prompt)
 
     def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
         """Generate image and caption for a category post."""
@@ -290,7 +306,7 @@ class GeminiGenerator:
             logger.error(f"Generation error for {place}: {e}")
             return None, None, None, None
 
-    def generate_single_historical_image(self, place: str, place_en: str, image_type: str) -> Tuple[Optional[bytes], Optional[str]]:
+    def generate_single_historical_image(self, place: str, place_en: str, image_type: str, schedule_time: str = None) -> Tuple[Optional[bytes], Optional[str]]:
         """Generate a single image for a historical place with its own caption."""
         
         if image_type == "past":
@@ -360,7 +376,8 @@ class GeminiGenerator:
             """
 
         try:
-            image_bytes = self.generate_image_via_gemini(image_prompt)
+            schedule_key = f"{place_en}_{image_type}"
+            image_bytes = self.generate_image_via_gemini(image_prompt, retry_on_daily_quota=True, schedule_time=schedule_time, schedule_key=schedule_key)
             if not image_bytes:
                 return None, None
 
@@ -563,7 +580,7 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["07:50", "07:52", "07:54"]
+        sl_times = ["23:59", "21:40", "21:42"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
@@ -577,9 +594,9 @@ class PostScheduler:
             return self.schedule_data[today]["historical_image_times"]
         # Default: past at 23:59, future at 21:40, destruction at 21:42
         image_times = [
-            {"time": "08:06", "image_type": "past"},
-            {"time": "08:08", "image_type": "future"},
-            {"time": "08:10", "image_type": "destruction"}
+            {"time": "08:40", "image_type": "past"},
+            {"time": "21:40", "image_type": "future"},
+            {"time": "21:42", "image_type": "destruction"}
         ]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
@@ -684,7 +701,7 @@ class SriLanka2050Bot:
             self.scheduler.mark_posted("historical", identifier)
         return success
 
-    def run_historical_single_image_post(self, place_index, image_type):
+    def run_historical_single_image_post(self, place_index, image_type, schedule_time=None):
         """Generate and post a single historical image with its own caption."""
         if place_index < 0 or place_index >= len(self.historical_places):
             return False
@@ -696,7 +713,7 @@ class SriLanka2050Bot:
             return False
         
         logger.info(f"🏛️ Generating {image_type} image for: {place_si} ({place_en})")
-        image_bytes, caption = self.gemini.generate_single_historical_image(place_si, place_en, image_type)
+        image_bytes, caption = self.gemini.generate_single_historical_image(place_si, place_en, image_type, schedule_time)
         
         if not image_bytes:
             logger.error(f"❌ Failed to generate {image_type} image for {identifier}")
@@ -729,7 +746,7 @@ def setup_schedules(bot):
     for entry in historical_image_times:
         time_str = entry["time"]
         image_type = entry["image_type"]
-        schedule.every().day.at(time_str).do(lambda it=image_type: scheduled_historical_single_image_post(bot, it))
+        schedule.every().day.at(time_str).do(lambda it=image_type, ts=time_str: scheduled_historical_single_image_post(bot, it, ts))
 
 def scheduled_category_post(bot, index):
     if index < len(bot.categories):
@@ -747,13 +764,13 @@ def scheduled_historical_post(bot):
             return schedule.CancelJob
     return schedule.CancelJob
 
-def scheduled_historical_single_image_post(bot, image_type):
+def scheduled_historical_single_image_post(bot, image_type, schedule_time):
     """Find next unposted historical place and post its single image."""
     for i, (place_si, place_en) in enumerate(bot.historical_places):
         identifier = f"{place_si} ({place_en})"
         if not bot.scheduler.is_historical_image_posted(identifier, image_type):
             logger.info(f"⏰ Scheduled time reached for historical {image_type}: {identifier}")
-            bot.run_historical_single_image_post(i, image_type)
+            bot.run_historical_single_image_post(i, image_type, schedule_time)
             return schedule.CancelJob
     logger.info(f"✅ All {image_type} images posted for all historical places today")
     return schedule.CancelJob
