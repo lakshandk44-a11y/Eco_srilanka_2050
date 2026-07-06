@@ -616,7 +616,7 @@ class PostScheduler:
             return self.schedule_data[today]["historical_image_times"]
         # Default: past at 08:40, future at 21:40, destruction at 21:42
         image_times = [
-            {"time": "09:50", "image_type": "past"},
+            {"time": "12:27", "image_type": "past"},
             {"time": "21:40", "image_type": "future"},
             {"time": "21:42", "image_type": "destruction"}
         ]
