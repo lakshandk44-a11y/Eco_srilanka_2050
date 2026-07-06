@@ -76,45 +76,64 @@ class GeminiGenerator:
         Generate high-quality image using Gemini 2.5 Flash (free tier).
         No additional API key needed.
         """
-        try:
-            logger.info(f"🎨 Generating image via Gemini 2.5 Flash...")
-            
-            generate_content_config = types.GenerateContentConfig(
-                temperature=1.0,
-                top_p=0.95,
-                top_k=40,
-                max_output_tokens=8192,
-                response_modalities=["TEXT", "IMAGE"]
-            )
+        max_retries = 5
+        base_delay = 35
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"🎨 Generating image via Gemini 2.5 Flash... (attempt {attempt+1}/{max_retries})")
+                
+                generate_content_config = types.GenerateContentConfig(
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=8192,
+                    response_modalities=["TEXT", "IMAGE"]
+                )
 
-            response = self.client.models.generate_content(
-                model="gemini-2.5-flash-image",
-                contents=prompt,
-                config=generate_content_config
-            )
+                response = self.client.models.generate_content(
+                    model="gemini-2.5-flash-image",
+                    contents=prompt,
+                    config=generate_content_config
+                )
 
-            if response and response.candidates:
-                for part in response.candidates[0].content.parts:
-                    if part.inline_data:
-                        mime_type = part.inline_data.mime_type
-                        image_bytes = part.inline_data.data
-                        if 'image' in mime_type and len(image_bytes) > 1000:
-                            logger.info(f"✅ Image generated via Gemini: {len(image_bytes)} bytes")
-                            return image_bytes
-                        else:
-                            logger.error(f"❌ Invalid image data: {mime_type}, size: {len(image_bytes)}")
+                if response and response.candidates:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            mime_type = part.inline_data.mime_type
+                            image_bytes = part.inline_data.data
+                            if 'image' in mime_type and len(image_bytes) > 1000:
+                                logger.info(f"✅ Image generated via Gemini: {len(image_bytes)} bytes")
+                                return image_bytes
+                            else:
+                                logger.error(f"❌ Invalid image data: {mime_type}, size: {len(image_bytes)}")
+                                return None
+                        elif part.text:
+                            logger.info(f"📝 Gemini response text (not image): {part.text[:100]}...")
                             return None
-                    elif part.text:
-                        logger.info(f"📝 Gemini response text (not image): {part.text[:100]}...")
-                        # Try: use text as enhanced prompt and ask for image again
+
+                logger.error(f"❌ No image in Gemini response")
+                return None
+
+            except Exception as e:
+                error_str = str(e)
+                if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    if attempt < max_retries - 1:
+                        retry_delay = base_delay + (attempt * 10)
+                        import re
+                        delay_match = re.search(r'retry in (\d+\.?\d*)s', error_str)
+                        if delay_match:
+                            retry_delay = float(delay_match.group(1)) + 5
+                        logger.warning(f"⚠️ Rate limited (attempt {attempt+1}). Waiting {retry_delay:.0f}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        logger.error(f"❌ Gemini image generation exception after {max_retries} retries: {e}")
                         return None
+                else:
+                    logger.error(f"❌ Gemini image generation exception: {e}")
+                    return None
 
-            logger.error(f"❌ No image in Gemini response")
-            return None
-
-        except Exception as e:
-            logger.error(f"❌ Gemini image generation exception: {e}")
-            return None
+        return None
 
     def generate_category_image(self, category: str) -> Tuple[Optional[bytes], Optional[str]]:
         """Generate image and caption for a category post."""
@@ -188,7 +207,7 @@ class GeminiGenerator:
         future_prompt = f"""
         Generate a photorealistic image of {place} ({place_en}), Sri Lanka in 2050
         with sustainable development and preservation. Heritage site preserved,
-        solar-powered facilities discretely placed, electric autonomous shuttles,
+        solar-powered facilities discreetly placed, electric autonomous shuttles,
         smart preservation systems, reforested surrounding areas, green technology,
         clear blue sky with fluffy white clouds, cinematic golden hour lighting,
         8K ultra realistic photography, harmonious sustainable future.
@@ -235,9 +254,9 @@ class GeminiGenerator:
             logger.info(f"🏛️ Generating 3 images for: {place} ({place_en})")
 
             past_bytes = _generate_single_image(past_prompt, "1/3 Past")
-            time.sleep(5)
+            time.sleep(60)
             future_bytes = _generate_single_image(future_prompt, "2/3 Future 2050")
-            time.sleep(5)
+            time.sleep(60)
             destruction_bytes = _generate_single_image(destruction_prompt, "3/3 Destruction")
 
             images = [img for img in [past_bytes, future_bytes, destruction_bytes] if img is not None]
@@ -270,6 +289,107 @@ class GeminiGenerator:
         except Exception as e:
             logger.error(f"Generation error for {place}: {e}")
             return None, None, None, None
+
+    def generate_single_historical_image(self, place: str, place_en: str, image_type: str) -> Tuple[Optional[bytes], Optional[str]]:
+        """Generate a single image for a historical place with its own caption."""
+        
+        if image_type == "past":
+            image_prompt = f"""
+            Generate a historically accurate photograph of {place} ({place_en}), Sri Lanka
+            in its original golden age. National Geographic documentary style,
+            historically accurate architecture and structures, natural lighting,
+            golden hour warm sunlight creating dramatic shadows,
+            vintage film quality, lush greenery, photorealistic.
+            """
+            caption_prompt = f"""
+            Write a single Facebook post caption in Sinhala language about the historical glory of {place} ({place_en}), Sri Lanka.
+
+            This post shows {place} in its original golden age.
+
+            Requirements:
+            - Write ONLY the caption text, no introductions or explanations
+            - 4-6 sentences in flowing, emotional Sinhala
+            - Describe the historical significance and beauty of this place
+            - End with 8-10 hashtags
+            - Include: #Heritage #{place_en.replace(' ', '')} #SriLanka #HistoricalGlory
+            - DO NOT use markdown formatting like ** or ##
+            """
+        elif image_type == "future":
+            image_prompt = f"""
+            Generate a photorealistic image of {place} ({place_en}), Sri Lanka in 2050
+            with sustainable development and preservation. Heritage site preserved,
+            solar-powered facilities discreetly placed, electric autonomous shuttles,
+            smart preservation systems, reforested surrounding areas, green technology,
+            clear blue sky with fluffy white clouds, cinematic golden hour lighting,
+            8K ultra realistic photography, harmonious sustainable future.
+            """
+            caption_prompt = f"""
+            Write a single Facebook post caption in Sinhala language about {place} ({place_en}), Sri Lanka in 2050.
+
+            This post shows how {place} could look in 2050 with proper preservation and sustainable development.
+
+            Requirements:
+            - Write ONLY the caption text, no introductions or explanations
+            - 4-6 sentences in flowing, emotional Sinhala
+            - Describe the beautiful sustainable future vision for this heritage site
+            - End with 8-10 hashtags
+            - Include: #SriLanka2050 #FutureHeritage #{place_en.replace(' ', '')} #SustainableSriLanka
+            - DO NOT use markdown formatting like ** or ##
+            """
+        else:  # destruction
+            image_prompt = f"""
+            Generate a photorealistic devastating environmental destruction of {place} ({place_en}), 
+            Sri Lanka. Plastic waste piles, garbage, graffiti on ancient walls,
+            dry cracked mud, toxic green algae, dead brown trees, polluted grey sky,
+            muted desaturated colors, photojournalism style, wide angle lens
+            showing full scale of destruction, ultra realistic.
+            """
+            caption_prompt = f"""
+            Write a single Facebook post caption in Sinhala language about the destruction of {place} ({place_en}), Sri Lanka.
+
+            This post shows the devastating environmental destruction and neglect of this heritage site.
+
+            Requirements:
+            - Write ONLY the caption text, no introductions or explanations
+            - 4-6 sentences in flowing, emotional Sinhala
+            - Raise awareness about protecting Sri Lanka's cultural heritage
+            - Strong call to action
+            - End with 8-10 hashtags
+            - Include: #ProtectHeritage #{place_en.replace(' ', '')} #SriLanka #ActNow
+            - DO NOT use markdown formatting like ** or ##
+            """
+
+        try:
+            image_bytes = self.generate_image_via_gemini(image_prompt)
+            if not image_bytes:
+                return None, None
+
+            logger.info(f"📝 Generating {image_type} caption for {place}...")
+            caption = None
+            
+            for attempt in range(3):
+                try:
+                    cap_response = self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=caption_prompt
+                    )
+                    caption = cap_response.text.strip() if cap_response.text else None
+                    if caption:
+                        break
+                except Exception as cap_e:
+                    wait_time = (attempt + 1) * 10
+                    logger.warning(f"⚠️ Caption attempt {attempt+1} failed. Retrying...")
+                    time.sleep(wait_time)
+
+            if not caption:
+                type_labels = {"past": "ඓතිහාසික තේජස", "future": "2050 අනාගතය", "destruction": "පාරිසරික විනාශය"}
+                caption = f"{place} - {type_labels.get(image_type, image_type)} #{place_en.replace(' ', '')} #SriLanka"
+
+            return image_bytes, caption
+
+        except Exception as e:
+            logger.error(f"Generation error for {place} {image_type}: {e}")
+            return None, None
 
 
 # ============================================================
@@ -443,12 +563,51 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["07:11", "07:13", "07:15"]
+        sl_times = ["07:50", "07:52", "07:54"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
         self._save_json(self.schedule_data, self.schedule_file)
         return sl_times
+
+    def get_historical_image_schedule(self):
+        """Returns list of (time, image_type) tuples for historical posts."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today in self.schedule_data and "historical_image_times" in self.schedule_data[today]:
+            return self.schedule_data[today]["historical_image_times"]
+        # Default: past at 23:59, future at 21:40, destruction at 21:42
+        image_times = [
+            {"time": "23:59", "image_type": "past"},
+            {"time": "21:40", "image_type": "future"},
+            {"time": "21:42", "image_type": "destruction"}
+        ]
+        if today not in self.schedule_data:
+            self.schedule_data[today] = {}
+        self.schedule_data[today]["historical_image_times"] = image_times
+        self._save_json(self.schedule_data, self.schedule_file)
+        return image_times
+
+    def mark_historical_image_posted(self, place_identifier, image_type):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today not in self.posted_log:
+            self.posted_log[today] = {"category": [], "historical": [], "historical_images": {}}
+        if "historical_images" not in self.posted_log[today]:
+            self.posted_log[today]["historical_images"] = {}
+        if place_identifier not in self.posted_log[today]["historical_images"]:
+            self.posted_log[today]["historical_images"][place_identifier] = []
+        if image_type not in self.posted_log[today]["historical_images"][place_identifier]:
+            self.posted_log[today]["historical_images"][place_identifier].append(image_type)
+        self._save_json(self.posted_log, self.log_file)
+
+    def is_historical_image_posted(self, place_identifier, image_type):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today not in self.posted_log:
+            return False
+        if "historical_images" not in self.posted_log[today]:
+            return False
+        if place_identifier not in self.posted_log[today]["historical_images"]:
+            return False
+        return image_type in self.posted_log[today]["historical_images"][place_identifier]
 
 
 # ============================================================
@@ -525,6 +684,37 @@ class SriLanka2050Bot:
             self.scheduler.mark_posted("historical", identifier)
         return success
 
+    def run_historical_single_image_post(self, place_index, image_type):
+        """Generate and post a single historical image with its own caption."""
+        if place_index < 0 or place_index >= len(self.historical_places):
+            return False
+        place_si, place_en = self.historical_places[place_index]
+        identifier = f"{place_si} ({place_en})"
+        
+        if self.scheduler.is_historical_image_posted(identifier, image_type):
+            logger.info(f"⏭️ {image_type} image already posted for {identifier}")
+            return False
+        
+        logger.info(f"🏛️ Generating {image_type} image for: {place_si} ({place_en})")
+        image_bytes, caption = self.gemini.generate_single_historical_image(place_si, place_en, image_type)
+        
+        if not image_bytes:
+            logger.error(f"❌ Failed to generate {image_type} image for {identifier}")
+            return False
+        
+        if not caption:
+            type_labels = {"past": "ඓතිහාසික තේජස", "future": "2050 අනාගතය", "destruction": "පාරිසරික විනාශය"}
+            caption = f"{place_si} - {type_labels.get(image_type, image_type)} #{place_en.replace(' ', '')} #SriLanka"
+        
+        logger.info(f"📤 Posting {image_type} image to Facebook...")
+        success = self.facebook.post_single_image(image_bytes, caption)
+        
+        if success:
+            self.scheduler.mark_historical_image_posted(identifier, image_type)
+            logger.info(f"✅ {image_type} image posted for {identifier}")
+        
+        return success
+
 
 # ============================================================
 # 7. SCHEDULE SETUP
@@ -535,9 +725,11 @@ def setup_schedules(bot):
     for i, time_str in enumerate(category_times):
         schedule.every().day.at(time_str).do(lambda idx=i: scheduled_category_post(bot, idx))
     
-    historical_times = bot.scheduler.get_daily_historical_schedule()
-    for time_str in historical_times:
-        schedule.every().day.at(time_str).do(lambda: scheduled_historical_post(bot))
+    historical_image_times = bot.scheduler.get_historical_image_schedule()
+    for entry in historical_image_times:
+        time_str = entry["time"]
+        image_type = entry["image_type"]
+        schedule.every().day.at(time_str).do(lambda it=image_type: scheduled_historical_single_image_post(bot, it))
 
 def scheduled_category_post(bot, index):
     if index < len(bot.categories):
@@ -553,6 +745,17 @@ def scheduled_historical_post(bot):
             logger.info(f"⏰ Scheduled time reached for historical: {identifier}")
             bot.run_historical_post(i)
             return schedule.CancelJob
+    return schedule.CancelJob
+
+def scheduled_historical_single_image_post(bot, image_type):
+    """Find next unposted historical place and post its single image."""
+    for i, (place_si, place_en) in enumerate(bot.historical_places):
+        identifier = f"{place_si} ({place_en})"
+        if not bot.scheduler.is_historical_image_posted(identifier, image_type):
+            logger.info(f"⏰ Scheduled time reached for historical {image_type}: {identifier}")
+            bot.run_historical_single_image_post(i, image_type)
+            return schedule.CancelJob
+    logger.info(f"✅ All {image_type} images posted for all historical places today")
     return schedule.CancelJob
 
 
@@ -616,6 +819,9 @@ if __name__ == "__main__":
             bot.run_category_post(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
         elif sys.argv[1] == "--test-historical":
             bot.run_historical_post(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
+        elif sys.argv[1] == "--test-historical-single":
+            img_type = sys.argv[2] if len(sys.argv) > 2 else "past"
+            bot.run_historical_single_image_post(int(sys.argv[3]) if len(sys.argv) > 3 else 0, img_type)
         elif sys.argv[1] == "--full-category":
             for i in range(len(bot.categories)):
                 bot.run_category_post(i)
@@ -629,6 +835,6 @@ if __name__ == "__main__":
         elif sys.argv[1] == "--schedule":
             print("Bot running - check logs")
         else:
-            print("Usage: python bot.py [--test-category N|--test-historical N|--full-category|--full-historical]")
+            print("Usage: python bot.py [--test-category N|--test-historical N|--test-historical-single TYPE N|--full-category|--full-historical]")
     else:
         main()
