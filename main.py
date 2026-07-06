@@ -617,8 +617,8 @@ class PostScheduler:
         # Default: past at 08:40, future at 21:40, destruction at 21:42
         image_times = [
             {"time": "12:27", "image_type": "past"},
-            {"time": "21:40", "image_type": "future"},
-            {"time": "21:42", "image_type": "destruction"}
+            {"time": "12:43", "image_type": "future"},
+            {"time": "12:46", "image_type": "destruction"}
         ]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
