@@ -595,7 +595,7 @@ class PostScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         if today in self.schedule_data and "historical_times" in self.schedule_data[today]:
             return self.schedule_data[today]["historical_times"]
-        sl_times = ["23:59", "21:40", "21:42"]
+        sl_times = ["12:06", "12:08, "12:10"]
         if today not in self.schedule_data:
             self.schedule_data[today] = {}
         self.schedule_data[today]["historical_times"] = sl_times
